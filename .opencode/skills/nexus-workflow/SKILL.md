@@ -1,6 +1,8 @@
 # Nexus Workflow Skill
 
 根据用户的需求描述，自动生成 Nexus 工作流 JSON 定义。
+**所有规则和模板都必须严格遵循 `references/WORKFLOW_REFERENCE.md` 的定义。**
+本 skill 只列出快速参考，完整细节一律以 WORKFLOW_REFERENCE.md 为准。
 
 ## 触发词
 
@@ -9,199 +11,140 @@
 - "create workflow"
 - "写一个工作流"
 
-## 工作流程式
+## 核心原则
+
+1. **引擎不感知节点类型。** 所有节点统一通过 `type: "subprocess"` 接入。
+2. **退出码判断完成。** exit 0 = 完成，非0 = 失败。这是判断进程结束的唯一可靠方式。
+3. **stdout 逐行实时读取。** 节点不需要等退出——每行 stdout 在运行时实时上报（nexus::node::chunk）。
+4. **调度拓扑 ≠ 数据拓扑。** `edges` 决定谁完成后谁开始，`dataflows` 决定谁的数据传给谁。两者独立。
+5. **All/Any 是完备的。** 任意布尔逻辑都可以用 All（合取）和 Any（析取）在图上等价表达。
+6. **所有 AI CLI 都是 subprocess。** 没有专门的 AI executor 或包装脚本。
+
+## 生成工作流的步骤
+
+### 步骤 1：分析需求
+
+从用户描述中提取：
+1. **节点数**：有几个独立的处理步骤？
+2. **数据流**：哪个步骤需要哪个步骤的输出？
+3. **调度依赖**：哪个步骤需要在哪个步骤之后执行？
+4. **分支条件**：有没有需要根据结果走不同路径的步骤？
+5. **节点类型**：所有节点是 subprocess 还是需要调用 AI CLI？
+
+### 步骤 2：确定拓扑
+
+**调度拓扑（edges）**：画出谁完成后谁应该开始。
+- 入口节点 = edges 中没有入边的节点
+- 扇出 = 多个节点同时依赖同一个上游
+- 扇入 = 一个节点依赖多个上游全部完成
+- 分支 = 一个节点根据不同结果触发不同下游
+
+**数据拓扑（dataflows）**：画出谁的数据需要传给谁。
+- 节点 B 需要节点 A 的输出 → `{"from": "A", "to": "B"}`
+- 可以用 alias 重命名 key
+
+### 步骤 3：编写工作流 JSON
+
+按以下模板生成。所有 field 的完整定义见 `references/WORKFLOW_REFERENCE.md`。
+
+#### 基础链式
 
 ```json
 {
   "nodes": [
     {
-      "id": "<节点 ID，简短英文>",
-      "providers": [{"type": "subprocess", "command": "<命令>"}],
-      "process_timeout_secs": <超时秒数>,
-      "predecessors": [
-        {"node_id": "<上游节点 ID>", "trigger": "all", "event": "complete"}
-      ],
-      "inputs": ["<上游节点 ID>"],
-      "max_concurrency": <可选，非必填>,
-      "returns": ["approved", "rejected"]
-    }
-  ]
-}
-```
-
-## 规则
-
-1. 每个节点必须有唯一的 `id`
-2. 入口节点（无前驱）的 `predecessors` 为 `[]`
-3. `providers` 目前只支持 `type: "subprocess"`，command 写实际要执行的命令
-4. `process_timeout_secs` 是必填字段
-5. `inputs` 声明需要哪些上游节点的输出
-6. `predecessors[].trigger` 可选 `"all"` 或 `"any"`
-7. `predecessors[].event` 可选 `"complete"`、`"failed"`、`"timeout"`
-8. `predecessors[].threshold` 默认为 1，可填大于 1 的值表示需要 N 次事件才触发
-9. `returns` 声明该节点的可能返回值，用于分支路由
-10. `max_concurrency` 可以覆盖引擎全局并发数
-
-## 节点协议
-
-所有节点通过 stdin/stdout 与引擎通信：
-
-- stdin：引擎写入 NodeContext JSON
-- stdout：节点输出纯文本结果
-- 首行以 `__nexus_exit_reason: <value>` 开头时为退出原因
-- exit 0 = 成功，非 0 = 失败
-
-节点可以用任何语言实现——Python、PowerShell、Node.js、Rust 等。
-
-## 示例
-
-### 基础链式工作流
-
-```
-A → B → C
-```
-
-```json
-{
-  "nodes": [
-    {
-      "id": "fetch",
-      "providers": [{"type": "subprocess", "command": "python fetcher.py"}],
+      "id": "step1",
+      "providers": [{"type": "subprocess", "command": "命令1"}],
       "process_timeout_secs": 30,
       "predecessors": []
     },
     {
-      "id": "process",
-      "providers": [{"type": "subprocess", "command": "python processor.py"}],
-      "process_timeout_secs": 60,
-      "predecessors": [
-        {"node_id": "fetch", "trigger": "all", "event": "complete"}
-      ],
-      "inputs": ["fetch"]
-    },
-    {
-      "id": "report",
-      "providers": [{"type": "subprocess", "command": "python reporter.py"}],
+      "id": "step2",
+      "providers": [{"type": "subprocess", "command": "命令2"}],
       "process_timeout_secs": 30,
       "predecessors": [
-        {"node_id": "process", "trigger": "all", "event": "complete"}
+        {"node_id": "step1", "trigger": "all", "event": "complete"}
       ],
-      "inputs": ["process"]
+      "inputs": ["step1"]
     }
   ]
 }
 ```
 
-### Fan-out / Fan-in
+#### 集成 AI（OpenCode / Claude Code）
 
-```
-    ┌→ B ─┐
-  A ┤     ├→ D
-    └→ C ─┘
-```
+所有 AI 工具直接写完整的 CLI 命令，不需要包装脚本：
 
+**OpenCode：**
 ```json
 {
-  "nodes": [
-    {
-      "id": "source",
-      "providers": [{"type": "subprocess", "command": "echo data"}],
-      "process_timeout_secs": 10,
-      "predecessors": []
-    },
-    {
-      "id": "branch_a",
-      "providers": [{"type": "subprocess", "command": "python a.py"}],
-      "process_timeout_secs": 30,
-      "predecessors": [
-        {"node_id": "source", "trigger": "all", "event": "complete"}
-      ],
-      "inputs": ["source"]
-    },
-    {
-      "id": "branch_b",
-      "providers": [{"type": "subprocess", "command": "python b.py"}],
-      "process_timeout_secs": 30,
-      "predecessors": [
-        {"node_id": "source", "trigger": "all", "event": "complete"}
-      ],
-      "inputs": ["source"]
-    },
-    {
-      "id": "merge",
-      "providers": [{"type": "subprocess", "command": "python merge.py"}],
-      "process_timeout_secs": 30,
-      "predecessors": [
-        {"node_id": "branch_a", "trigger": "all", "event": "complete"},
-        {"node_id": "branch_b", "trigger": "all", "event": "complete"}
-      ],
-      "inputs": ["branch_a", "branch_b"]
-    }
-  ]
+  "id": "ai_task",
+  "providers": [{
+    "type": "subprocess",
+    "command": "opencode run --format json --dangerously-skip-permissions --model claude-sonnet-4 -- \"提示词内容\""
+  }],
+  "process_timeout_secs": 300,
+  "predecessors": []
 }
 ```
 
-### 分支路由
-
+**Claude Code：**
 ```json
 {
-  "nodes": [
-    {
-      "id": "review",
-      "providers": [{"type": "subprocess", "command": "python reviewer.py"}],
-      "process_timeout_secs": 60,
-      "predecessors": [
-        {"node_id": "source", "trigger": "all", "event": "complete"}
-      ],
-      "inputs": ["source"],
-      "returns": ["approved", "rejected"]
-    },
-    {
-      "id": "deploy",
-      "providers": [{"type": "subprocess", "command": "python deploy.py"}],
-      "process_timeout_secs": 120,
-      "predecessors": [
-        {"node_id": "review", "trigger": "all", "event": "complete", "exit_reason": "approved"}
-      ]
-    },
-    {
-      "id": "notify_rejected",
-      "providers": [{"type": "subprocess", "command": "python notify.py rejected"}],
-      "process_timeout_secs": 10,
-      "predecessors": [
-        {"node_id": "review", "trigger": "all", "event": "complete", "exit_reason": "rejected"}
-      ]
-    }
-  ]
+  "id": "ai_task",
+  "providers": [{
+    "type": "subprocess",
+    "command": "claude -p \"提示词内容\" --output-format json --model claude-sonnet-4"
+  }],
+  "process_timeout_secs": 300,
+  "predecessors": []
 }
 ```
 
-### 集成 OpenCode
-
+**链式传递上游数据给 AI：**
 ```json
 {
-  "nodes": [
-    {
-      "id": "config",
-      "providers": [{"type": "subprocess", "command": "cmd.exe /c echo {\"prompt\":\"...\",\"model\":\"...\"}"}],
-      "process_timeout_secs": 10,
-      "predecessors": []
-    },
-    {
-      "id": "ai_task",
-      "providers": [{"type": "subprocess", "command": "powershell -ExecutionPolicy Bypass -File node-opencode.ps1"}],
-      "process_timeout_secs": 300,
-      "predecessors": [
-        {"node_id": "config", "trigger": "all", "event": "complete"}
-      ],
-      "inputs": ["config"]
-    }
-  ]
+  "id": "ai_task",
+  "providers": [{
+    "type": "subprocess",
+    "command": "opencode run --format json --dangerously-skip-permissions -- \"{{inputs.config}}\""
+  }],
+  "process_timeout_secs": 300,
+  "predecessors": [
+    {"node_id": "config", "trigger": "all", "event": "complete"}
+  ],
+  "inputs": ["config"]
 }
 ```
+
+### 步骤 4：验证
+
+生成完后检查：
+1. 所有节点 ID 唯一
+2. 入口节点的 `predecessors` 为 `[]`
+3. 非入口节点至少有一个 `predecessor`
+4. `process_timeout_secs` 对所有节点都设置了合理的值
+5. `edges` 中的 `from` 和 `to` 都存在于 `nodes` 中
+6. `dataflows` 中的 `from` 和 `to` 都存在于 `nodes` 中
+7. 分支路由的 `returns` 和 `exit_reason` 值匹配
+8. 模板插值 `{{inputs.X}}` 中的 X 在 `inputs` 数组中存在
+
+## 规则速查
+
+| 规则 | 说明 |
+|------|------|
+| type | 仅支持 `"subprocess"` |
+| 入口节点 | `predecessors: []` |
+| 唯一 ID | 所有节点 id 不可重复 |
+| threshold | 默认 1，大于 1 需要 N 次才触发 |
+| exit_reason | 精确字符串匹配 |
+| 模板插值 | `{{inputs.node_id}}` 在 spawn 前替换 |
+| 退出码判断 | exit 0 = 完成，非0 = 失败 |
 
 ## 参考
 
-- NODE_PROTOCOL: `docs/architecture/NODE_PROTOCOL.md`
-- 架构设计: `docs/architecture/ARCHITECTURE.md`
-- 完整参考: `docs/REFERENCE.md`（面向 agent 的 schema 和机制说明）
+- **完整参考（本地机密）**: `references/WORKFLOW_REFERENCE.md`（所有 schema、机制、模式模板、边界情况的唯一权威来源）
+- **Architecture**: `references/WORKFLOW_REFERENCE.md §1-3`
+- **Node Protocol**: `references/WORKFLOW_REFERENCE.md §4`
+- **Mode Templates**: `references/WORKFLOW_REFERENCE.md §6`
+- **Integration Examples**: `references/WORKFLOW_REFERENCE.md §7`
