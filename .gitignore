@@ -1,0 +1,28 @@
+# Rust
+target/
+*.rs.bk
+# Cargo.lock - now tracking for binary project reproducibility
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+.codegraph/
+.omo/
+log/
+nexus-dist/
+
+# Build artifacts
+**/*.o
+**/*.exe
+**/*.dll
+**/*.so
+**/*.dylib
