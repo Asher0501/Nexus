@@ -22,7 +22,6 @@ nexus-dist/
 
 # Core documentation (confidential)
 docs/
-references/
 
 # Build artifacts
 **/*.o
