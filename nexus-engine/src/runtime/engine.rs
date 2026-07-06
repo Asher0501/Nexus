@@ -9,7 +9,47 @@ use tokio::sync::{mpsc, Semaphore};
 use crate::diagnostics::event::{self, EngineLifecycleEvent, NodeLifecycleEvent};
 use crate::graph::{DataRouter, Scheduler};
 use crate::model::{EngineConfig, EventType, ValidationError, WorkflowDef};
-use crate::nodeshell::{NodeChunk, NodeContext, NodeExecutor, SpawnError};
+use crate::nodeshell::{NodeChunk, NodeContext, NodeExecutor, NodeOutcome, SpawnError};
+
+/// Callback for real-time node lifecycle events consumed by the CLI.
+///
+/// The engine emits these events alongside the existing tracing events.
+/// CLI layers use this to drive a live status display.
+pub type NodeEventCb = Arc<dyn Fn(NodeEvent) + Send + Sync>;
+
+/// Node lifecycle event consumed by the CLI status display.
+#[derive(Debug, Clone)]
+pub enum NodeEvent {
+    /// A node started execution.
+    NodeRunning {
+        /// The node's ID.
+        node_id: String,
+        /// The command being executed (debug representation).
+        command: String,
+    },
+    /// A node produced a line of output.
+    NodeChunk {
+        /// The node's ID.
+        node_id: String,
+        /// The output text line.
+        text: String,
+    },
+    /// A node completed successfully.
+    NodeCompleted {
+        /// The node's ID.
+        node_id: String,
+    },
+    /// A node failed.
+    NodeFailed {
+        /// The node's ID.
+        node_id: String,
+    },
+    /// A node timed out.
+    NodeTimedOut {
+        /// The node's ID.
+        node_id: String,
+    },
+}
 
 /// Internal event type for the engine's event loop.
 #[derive(Debug)]
@@ -18,6 +58,13 @@ enum EngineEvent {
     NodeReady {
         /// The node's graph index.
         node_id: NodeIndex,
+    },
+    /// A node execution completed (dispatched from a spawned task).
+    NodeCompleted {
+        /// The node's graph index.
+        node_id: NodeIndex,
+        /// The outcome of execution.
+        outcome: Result<NodeOutcome, SpawnError>,
     },
 }
 
@@ -32,7 +79,6 @@ enum EngineEvent {
 /// executing nodes.  When a `NodeReady` event arrives, the engine must
 /// `acquire` a permit before spawning the subprocess.  If all permits
 /// are taken, the event handler awaits until one becomes available.
-#[derive(Debug)]
 pub struct Engine {
     /// Graph execution scheduler (runtime state).
     scheduler: Scheduler,
@@ -48,6 +94,19 @@ pub struct Engine {
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     /// Receiver half of the internal event channel.
     event_rx: mpsc::UnboundedReceiver<EngineEvent>,
+    /// Optional callback for real-time node lifecycle events.
+    event_cb: Option<NodeEventCb>,
+}
+
+impl fmt::Debug for Engine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Engine")
+            .field("scheduler", &self.scheduler)
+            .field("config", &self.config)
+            .field("running_count", &self.running_count)
+            .field("event_cb", &self.event_cb.as_ref().map(|_| "Some(...)"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Engine {
@@ -64,9 +123,13 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Returns a vector of [`ValidationError`]s if the workflow definition
+    /// Returns a vector of [`ValidationError]s if the workflow definition
     /// cannot be built into a valid graph.
-    pub fn new(def: WorkflowDef, config: EngineConfig) -> Result<Self, Vec<ValidationError>> {
+    pub fn new(
+        def: WorkflowDef,
+        config: EngineConfig,
+        event_cb: Option<NodeEventCb>,
+    ) -> Result<Self, Vec<ValidationError>> {
         let graph = crate::graph::Builder::build(&def)?;
         let node_id_to_index: HashMap<String, NodeIndex> = graph
             .node_indices()
@@ -92,6 +155,7 @@ impl Engine {
             semaphore,
             event_tx: tx,
             event_rx: rx,
+            event_cb,
         })
     }
 
@@ -154,9 +218,8 @@ impl Engine {
     ///
     /// 1. Acquire a concurrency permit (may await if at `max_concurrency`).
     /// 2. Extract node data while holding `&mut self`.
-    /// 3. Execute the node (relinquishes the `&mut self` borrow during I/O).
-    /// 4. Handle outcome, emit metrics, propagate events.
-    /// 5. Release the permit (via `_permit` drop).
+    /// 3. Spawn node execution (does not block the event loop).
+    /// 4. Outcome handling is done via `NodeCompleted` event.
     async fn handle_event(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::NodeReady { node_id } => {
@@ -192,8 +255,15 @@ impl Engine {
 
                 event::emit_lifecycle(&NodeLifecycleEvent::Running {
                     node_id: nid.clone(),
-                    command: command_label,
+                    command: command_label.clone(),
                 });
+
+                if let Some(ref cb) = self.event_cb {
+                    cb(NodeEvent::NodeRunning {
+                        node_id: nid.clone(),
+                        command: command_label,
+                    });
+                }
 
                 let inputs = self.data_router.build_input(node_id);
 
@@ -215,13 +285,13 @@ impl Engine {
                     extensions: HashMap::new(),
                 };
 
-                // Step 3: execute (I/O — &mut self is not held during this await).
-                // Streams stdout/stderr via tracing in real time.
-                // Create a chunk channel for real-time streaming output.
+                // Step 3: spawn execution in a background task so the event
+                // loop can process other NodeReady events concurrently.
                 let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<NodeChunk>();
                 let chunk_node_id = nid.clone();
 
-                // Spawn a consumer that forwards chunks to diagnostics.
+                // Spawn a consumer that forwards chunks to diagnostics and callbacks.
+                let chunk_cb = self.event_cb.clone();
                 tokio::spawn(async move {
                     while let Some(chunk) = chunk_rx.recv().await {
                         tracing::info!(
@@ -229,10 +299,28 @@ impl Engine {
                             node_id = chunk_node_id,
                             text = chunk.text,
                         );
+                        if let Some(ref cb) = chunk_cb {
+                            cb(NodeEvent::NodeChunk {
+                                node_id: chunk_node_id.clone(),
+                                text: chunk.text,
+                            });
+                        }
                     }
                 });
 
-                let outcome = executor.run(ctx, timeout, &nid, Some(chunk_tx)).await;
+                // Spawn the actual node execution; outcome comes back via event.
+                let outcome_tx = tx.clone();
+                tokio::spawn(async move {
+                    let outcome = executor.run(ctx, timeout, &nid, Some(chunk_tx)).await;
+                    let _ = outcome_tx.send(EngineEvent::NodeCompleted {
+                        node_id,
+                        outcome,
+                    });
+                });
+            }
+
+            EngineEvent::NodeCompleted { node_id, outcome } => {
+                let nid = self.node_id(node_id);
 
                 // Step 4: process outcome.
                 match outcome {
@@ -258,7 +346,7 @@ impl Engine {
                                 .copied()
                                 .unwrap_or(0);
 
-                            if self.scheduler.retry_node(node_id, max_retries) {
+                            if self.scheduler.retry_node(node_id, self.config.max_retries) {
                                 event::emit_lifecycle(&NodeLifecycleEvent::Failed {
                                     node_id: nid,
                                     exit_reason: outcome
@@ -268,7 +356,7 @@ impl Engine {
                                     retry_count,
                                 });
                                 // Retry scheduled — re-enqueue.
-                                let _ = tx.send(EngineEvent::NodeReady { node_id });
+                                let _ = self.event_tx.send(EngineEvent::NodeReady { node_id });
                                 self.running_count -= 1;
                                 return;
                             }
@@ -278,9 +366,12 @@ impl Engine {
                         match event_type {
                             EventType::Complete => {
                                 event::emit_lifecycle(&NodeLifecycleEvent::Completed {
-                                    node_id: nid,
+                                    node_id: nid.clone(),
                                     output_size: outcome.output.len(),
                                 });
+                                if let Some(ref cb) = self.event_cb {
+                                    cb(NodeEvent::NodeCompleted { node_id: nid });
+                                }
                             }
                             EventType::Failed => {
                                 let reason = outcome
@@ -288,7 +379,7 @@ impl Engine {
                                     .clone()
                                     .unwrap_or_else(|| "failed".into());
                                 event::emit_lifecycle(&NodeLifecycleEvent::Failed {
-                                    node_id: nid,
+                                    node_id: nid.clone(),
                                     exit_reason: reason.clone(),
                                     retry_count: self
                                         .scheduler
@@ -298,12 +389,18 @@ impl Engine {
                                         .copied()
                                         .unwrap_or(0),
                                 });
+                                if let Some(ref cb) = self.event_cb {
+                                    cb(NodeEvent::NodeFailed { node_id: nid });
+                                }
                             }
                             EventType::Timeout => {
                                 event::emit_lifecycle(&NodeLifecycleEvent::TimedOut {
-                                    node_id: nid,
-                                    timeout_secs: timeout.as_secs(),
+                                    node_id: nid.clone(),
+                                    timeout_secs: self.config.default_node_timeout_secs,
                                 });
+                                if let Some(ref cb) = self.event_cb {
+                                    cb(NodeEvent::NodeTimedOut { node_id: nid });
+                                }
                             }
                         }
 
@@ -315,7 +412,7 @@ impl Engine {
                         );
 
                         for target in ready_nodes {
-                            let _ = tx.send(EngineEvent::NodeReady { node_id: target });
+                            let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: target });
                         }
                     }
                     Err(_e) => {
@@ -331,7 +428,7 @@ impl Engine {
                             Some("spawn_error"),
                         );
                         for target in ready_nodes {
-                            let _ = tx.send(EngineEvent::NodeReady { node_id: target });
+                            let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: target });
                         }
                     }
                 }
@@ -443,7 +540,7 @@ mod tests {
     async fn test_engine_new_success() {
         let def = chain_workflow();
         let config = EngineConfig::default();
-        let engine = Engine::new(def, config);
+        let engine = Engine::new(def, config, None);
         assert!(engine.is_ok(), "Engine::new should succeed for valid workflow");
     }
 
@@ -456,7 +553,7 @@ mod tests {
             dataflows: vec![],
         };
         let config = EngineConfig::default();
-        let engine = Engine::new(def, config);
+        let engine = Engine::new(def, config, None);
         // Empty graph passes validation (no errors), builds fine.
         assert!(engine.is_ok(), "empty workflow should be valid");
     }
@@ -486,7 +583,7 @@ mod tests {
             dataflows: vec![],
         };
         let config = EngineConfig::default();
-        let engine = Engine::new(def, config);
+        let engine = Engine::new(def, config, None);
         assert!(engine.is_err(), "duplicate node ID should fail Engine::new");
     }
 
@@ -498,7 +595,7 @@ mod tests {
             dataflows: vec![],
         };
         let config = EngineConfig::new(None, 3600, 3);
-        let mut engine = Engine::new(def, config).expect("empty workflow");
+        let mut engine = Engine::new(def, config, None).expect("empty workflow");
         let result = engine.run().await;
         assert!(result.is_ok(), "empty workflow should converge immediately");
     }

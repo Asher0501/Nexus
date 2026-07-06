@@ -1,18 +1,19 @@
 //! Nexus CLI — Command-line interface for the Nexus workflow engine.
 //!
 //! Usage: nexus run <workflow.json> [OPTIONS]
+//!
+//! This binary needs unsafe code for Windows console API (SetConsoleMode).
+#![cfg_attr(windows, allow(unsafe_code))]
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use nexus_engine::diagnostics::snapshot::EngineSnapshot;
 use nexus_engine::graph::validate;
 use nexus_engine::model::{EngineConfig, WorkflowDef};
-use nexus_engine::runtime::{Engine, RuntimeError};
-#[cfg(test)]
-#[doc(hidden)]
-pub use tempfile as _tempfile_dev;
+use nexus_engine::runtime::{Engine, NodeEvent, RuntimeError};
 
 /// Nexus workflow engine CLI.
 #[derive(Parser)]
@@ -54,6 +55,26 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    // Enable ANSI escape sequence processing on Windows.
+    #[cfg(windows)]
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            let handle = winapi::um::processenv::GetStdHandle(
+                winapi::um::winbase::STD_ERROR_HANDLE,
+            );
+            if handle != winapi::um::handleapi::INVALID_HANDLE_VALUE {
+                let mut mode: u32 = 0;
+                if winapi::um::consoleapi::GetConsoleMode(handle, &mut mode) != 0 {
+                    let _ = winapi::um::consoleapi::SetConsoleMode(
+                        handle,
+                        mode | winapi::um::wincon::ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+                    );
+                }
+            }
+        }
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -129,8 +150,33 @@ async fn main() {
                 3,
             );
 
+            // Create the event callback that logs events to stderr in real time.
+            let event_cb: nexus_engine::runtime::NodeEventCb = Arc::new(move |event| {
+                use std::io::Write;
+                match event {
+                    NodeEvent::NodeRunning { node_id, .. } => {
+                        let _ = writeln!(std::io::stderr(), "[>] {node_id}: running...");
+                    }
+                    NodeEvent::NodeCompleted { node_id } => {
+                        let _ = writeln!(std::io::stderr(), "[v] {node_id}: completed");
+                    }
+                    NodeEvent::NodeFailed { node_id } => {
+                        let _ = writeln!(std::io::stderr(), "[x] {node_id}: failed");
+                    }
+                    NodeEvent::NodeTimedOut { node_id } => {
+                        let _ = writeln!(std::io::stderr(), "[x] {node_id}: timed out");
+                    }
+                    NodeEvent::NodeChunk { node_id, text } => {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() && trimmed.len() < 120 {
+                            let _ = writeln!(std::io::stderr(), "[ ] {node_id}: {trimmed}");
+                        }
+                    }
+                }
+            });
+
             // Create and run engine
-            let mut engine = match Engine::new(def, config) {
+            let mut engine = match Engine::new(def, config, Some(event_cb)) {
                 Ok(e) => e,
                 Err(errors) => {
                     for err in &errors {

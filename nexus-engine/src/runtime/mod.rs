@@ -9,4 +9,4 @@
 
 mod engine;
 
-pub use engine::{Engine, RuntimeError};
+pub use engine::{Engine, NodeEvent, NodeEventCb, RuntimeError};
