@@ -20,6 +20,9 @@ Thumbs.db
 log/
 nexus-dist/
 
+# Core documentation (confidential)
+docs/
+
 # Build artifacts
 **/*.o
 **/*.exe
