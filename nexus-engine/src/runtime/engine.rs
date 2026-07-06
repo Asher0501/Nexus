@@ -294,7 +294,7 @@ impl Engine {
                 let chunk_cb = self.event_cb.clone();
                 tokio::spawn(async move {
                     while let Some(chunk) = chunk_rx.recv().await {
-                        tracing::debug!(
+                        tracing::info!(
                             target: "nexus::node::chunk",
                             node_id = chunk_node_id,
                             text = chunk.text,
