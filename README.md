@@ -1,163 +1,217 @@
-# Nexus — 有向图驱动的插件编排引擎
+# Nexus
 
-Nexus 是一个有向图驱动的插件编排引擎。它读取 JSON 定义的工作流，构建有向图，然后调度执行图中的节点。所有节点统一为 `subprocess` 类型，通过退出码判断完成状态，通过 stdout 返回结果。**不改引擎代码，通过 NODE_PROTOCOL 即可接入任何工具。**
+> **有向图驱动的插件编排引擎** — 任何子进程都是节点，退出码决定完成，stdout 即结果。
+
+---
+
+Nexus 是一个低层级的工作流编排引擎。你将工作流定义为一张有向图：节点就是子进程，边就是触发条件。没有中心化的流程控制器——每个节点只带自己的计数器和出边规则，引擎反复问每个节点「你的条件满足了吗」，直到所有人都说「不满足了」。
+
+```mermaid
+graph LR
+    A["JSON Workflow Def"] --> B["serde_json parse"]
+    B --> C["WorkflowDef"]
+    C --> D["DiGraphBuilder"]
+    D --> E["GraphDef"]
+    E --> F{"Validator"}
+    F -->|pass| G["Runtime Engine"]
+    F -->|fail| H["ValidationError"]
+```
+
+## 为什么用 Nexus？
+
+Nexus 提供的是基础设施，不是抽象——它不封装你的业务逻辑，也不猜测你的节点类型：
+
+- **进程即节点** — 任何 stdin/stdout 的子进程都可以成为节点。Python、PowerShell、Rust、Node.js、OpenCode、Claude Code——不改引擎代码。
+- **退出码即完成** — exit 0 = 完成，非 0 = 失败。这是判断进程结束的唯一方式。不依赖超时、不依赖心跳、不依赖最后一行 JSON。
+- **逐行流式输出** — 每行 stdout 在节点运行时实时上报（`--verbose` 可见）。进程不需要等退出——中间结果实时可观测。
+- **无节点类型耦合** — 没有 AI executor、没有 HTTP executor。所有节点统一为 `type: "subprocess"`。引擎不感知节点类型。
+- **边驱动调度** — 边由四个正交维度定义：事件类型（Complete/Failed/Timeout）、返回值（exit_reason）、组合逻辑（All/Any）、阈值（threshold）。不需要第五种维度。
+- **调度拓扑 ≠ 数据拓扑** — `edges` 决定谁完成后谁开始，`dataflows` 决定谁的数据传给谁。两张独立的图。
 
 ## 快速开始
 
 ```bash
-# 验证工作流（不执行）
+# 验证工作流
 nexus-cli run test_workflow.json --validate-only
 
 # 运行一个工作流
 nexus-cli run test_workflow.json
 
-# 详细日志（含流式输出）
+# 查看流式输出
 nexus-cli run test_workflow.json --verbose
 
-# 执行完后 dump 节点状态
+# 完成后输出节点状态
 nexus-cli run test_workflow.json --dump-state
 ```
 
-## 架构
+## 工作流定义
 
-```
-nexus-engine/    ← 核心引擎库（lib crate）
-nexus-cli/       ← 命令行工具（binary crate，1.5MB静态链接）
-nexus-mcp-server/← MCP 服务器（JSON-RPC stdio 协议）
-```
-
-### 执行流程
-
-```
-Scheduler (调度层) → 决定谁 ready
-    ↓ NodeReady
-Semaphore (并发控制) → acquire() 等空位
-    ↓ spawn
-SubprocessExecutor → stdin 写 JSON + 逐行读 stdout + wait
-    ↓ 实时 chunk（nexus::node::chunk） + 最终 stdout
-DataRouter → 存储输出，传递给下游
-```
-
-### 流式输出
-
-节点执行期间，每行 stdout 会通过 `nexus::node::chunk` 事件实时上报（`--verbose` 时可见）。
-节点退出后，完整输出进入 DataRouter 传递给下游。
-
-## 节点协议（NODE_PROTOCOL）
-
-**任何语言实现的进程都可以成为 Nexus 节点，不改引擎代码。**
-
-```
-stdin  ← NodeContext JSON（引擎写入）
-stdout → 纯文本结果（引擎实时逐行读取）
-exit   → 0 = 完成，非0 = 失败
-```
-
-分支路由在 stdout 首行加前缀：
-```
-__nexus_exit_reason: approved
-业务输出内容...
-```
-
-流式事件在 stdout 行加前缀（进程无需等退出即可发送）：
-```
-__nexus_event: 进度：2/5 完成
-```
-
-## 工作流示例
+工作流由三部分组成：节点（nodes）、调度边（edges）、数据流（dataflows）。
 
 ```json
 {
   "nodes": [
     {
-      "id": "step1",
-      "providers": [{"type": "subprocess", "command": "python my_plugin.py"}],
-      "process_timeout_secs": 30,
-      "predecessors": []
+      "id": "fetch_data",
+      "providers": [{"type": "subprocess", "command": "python fetcher.py"}],
+      "process_timeout_secs": 30
     },
     {
-      "id": "step2",
-      "providers": [{"type": "subprocess", "command": "powershell -File step2.ps1"}],
-      "process_timeout_secs": 60,
+      "id": "validate",
+      "providers": [{"type": "subprocess", "command": "python validator.py"}],
+      "process_timeout_secs": 10,
       "predecessors": [
-        {"node_id": "step1", "trigger": "all", "event": "complete"}
+        {"node_id": "fetch_data", "trigger": "all", "event": "complete"}
       ],
-      "inputs": ["step1"]
+      "inputs": ["fetch_data"]
     }
   ]
 }
 ```
 
-### 集成 OpenCode / Claude Code
+所有工具统一通过 `type: "subprocess"` 接入：
 
-```bash
-nexus-cli run workflows\opencode-example.json
-```
-
-OpenCode、Claude Code 等 AI 工具通过 `subprocess` 节点直接接入，不需要包装脚本：
-
+**OpenCode：**
 ```json
 {
   "type": "subprocess",
-  "command": "opencode run --format json --dangerously-skip-permissions -- \"{{inputs.prompt}}\""
+  "command": "opencode run --format json --dangerously-skip-permissions -- \"review this code\""
 }
 ```
 
-所有子进程统一由 SubprocessExecutor 管理（spawn、pipe、timeout、逐行流式读取）。
-**不需要 AI 专用 executor，不需要包装脚本。**
+**Claude Code：**
+```json
+{
+  "type": "subprocess",
+  "command": "claude -p \"review this code\" --output-format json --model claude-sonnet-4"
+}
+```
 
-## CLI 参数
+**链式传递上游数据（模板插值）：**
+```json
+{
+  "type": "subprocess",
+  "command": "opencode run --format json --dangerously-skip-permissions -- \"{{inputs.config}}\""
+}
+```
+
+## 工作原理
+
+### 三层架构
+
+```mermaid
+graph TD
+    subgraph "引擎 Engine"
+        E1["事件循环"]
+        E2["调度 · 并发控制"]
+        E3["边: 触发判定"]
+        E4["机械计数 · 数据路由"]
+    end
+    subgraph "NodeShell"
+        N1["根据 command 启动进程"]
+        N2["逐行流式读取 stdout"]
+        N3["exit_code → 事件类型"]
+    end
+    subgraph "节点 Node"
+        P1["读 stdin → 计算 → 写 stdout"]
+        P2["exit 0"]
+    end
+
+    E1 -->|NodeShell::run| N1
+    N1 -->|stdin / stdout| P1
+```
+
+### 执行流程
+
+```
+Scheduler → 决定谁 ready
+    ↓ NodeReady
+Semaphore → acquire() 等空位
+    ↓ spawn
+SubprocessExecutor → stdin 写 JSON + 逐行读 stdout（实时 chunk）+ wait
+    ↓ stdout（逐行实时）
+DataRouter → 存储输出，传递给下游
+```
+
+### 边触发算法
+
+```
+for each out_edge of completed_node:
+  1. 如果边已被触发，跳过
+  2. 如果事件类型不匹配，跳过
+  3. 如果 exit_reason 配置了且不匹配，跳过
+  4. All 策略：如果 received 未包含所有上游，跳过
+  5. event_count++
+  6. event_count >= threshold → triggered=true, 入队目标节点
+```
+
+### 重试机制
+
+节点 Failed 或 Timeout 后，默认最多重试 3 次：
+
+```
+节点 Failed/Timeout
+  → retry_count < max_retries (默认 3)?
+    → retry_count++ → 重新执行节点
+  → 否则触发 Failed/Timeout 出边
+```
+
+## CLI
 
 ```
 nexus-cli run <workflow.json>
+
   --max-concurrency N    最大并发节点数（默认：CPU 核数）
-  --node-timeout S       节点默认超时秒数（默认：3600，被节点的 process_timeout_secs 覆盖）
+  --node-timeout S       节点默认超时秒数（默认：3600）
   --verbose              详细日志（含流式 chunk 输出）
   --validate-only        仅验证，不执行
-  --dump-state           完成后输出节点状态快照
+  --dump-state           输出节点状态快照
+
+退出码：
+  0  Success
+  1  Validation error
+  2  Runtime error
+  3  Idle timeout
 ```
 
-| 退出码 | 含义 |
-|--------|------|
-| 0 | 成功 |
-| 1 | 验证/读取错误 |
-| 2 | 运行时错误 |
-| 3 | 引擎空闲超时 |
+## 模式
 
-## 设计文档
-
-| 文档 | 内容 |
+| 模式 | 说明 |
 |------|------|
-| `docs/architecture/ARCHITECTURE.md` | 系统架构设计 |
-| `docs/architecture/NODE_PROTOCOL.md` | 节点通信协议（含流式协议） |
-| `docs/philosophy/DESIGN_PHILOSOPHY.md` | 设计哲学 |
-| `code/review/` | 所有检视意见及处理方案 |
+| 链式 | A → B → C，严格顺序执行 |
+| 扇出/扇入 | A → B, A → C → D（All 等待全部完成） |
+| 条件分支 | review → approved/deploy, rejected/fix（exit_reason 路由） |
+| 带阈值循环 | collector 自环 3 次后触发 aggregator（threshold: 3） |
+| 错误处理 | A(Complete → B, Failed → error_handler) |
+| 并行聚合 | A, B, C 同时执行 → M 等待全部完成（All） |
 
-## 打包部署
+详细模式模板见 [`references/WORKFLOW_REFERENCE.md`](./references/WORKFLOW_REFERENCE.md)。
+
+## crate 划分
+
+```
+nexus-engine/    ← 核心引擎库（lib crate）
+nexus-cli/       ← 命令行工具（binary crate，1.5MB 静态链接）
+nexus-mcp-server/← MCP 服务器（JSON-RPC stdio 协议）
+```
+
+## 构建
 
 ```bash
 # 构建
 cargo build --release
 
-# 打包（包含运行时依赖）
+# 打包（独立分发）
 powershell -File scripts\package.ps1
 ```
 
-产物在 `nexus-dist/` 目录：
-```
-nexus-dist/
-├── bin/
-│   ├── nexus-cli.exe            # 命令行工具（1.5MB，独立 exe）
-│   └── nexus-mcp-server.exe     # MCP 服务器
-├── workflows/
-│   └── opencode-example.json    # OpenCode 工作流示例
-├── test_workflow.json           # 测试工作流
-└── README.md
-```
-
-目标平台需要：Rust 1.83+（仅编译时需要），运行时无需额外依赖。
+产物在 `nexus-dist/` 目录——单个 `nexus-cli.exe`（1.5MB），零运行时依赖。
 
 ## 系统要求
 
 - 编译：Rust 1.83+ (edition 2024)
 - 运行：Windows (GNU/MSVC) 或 Linux
+
+---
+
+**Nexus 不封装你的逻辑。它只提供图的骨架。你把骨架填上子进程，它就跑。**
