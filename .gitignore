@@ -23,8 +23,8 @@ nexus-dist/
 # Core documentation (confidential)
 docs/
 
-# Review artifacts
-code/review/
+# Review / backup artifacts
+bak/
 
 # Archives
 *.zip
