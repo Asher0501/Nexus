@@ -23,6 +23,12 @@ nexus-dist/
 # Core documentation (confidential)
 docs/
 
+# Review artifacts
+code/review/
+
+# Archives
+*.zip
+
 # Build artifacts
 **/*.o
 **/*.exe
