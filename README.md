@@ -103,12 +103,14 @@ nexus-cli run test_workflow.json --dump-state
     {
       "id": "validate",
       "providers": [{"type": "subprocess", "command": "python validator.py"}],
-      "process_timeout_secs": 10,
-      "predecessors": [
-        {"node_id": "fetch_data", "trigger": "all", "event": "complete"}
-      ],
-      "inputs": ["fetch_data"]
+      "process_timeout_secs": 10
     }
+  ],
+  "edges": [
+    { "from": "fetch_data", "to": "validate", "trigger": "all", "event": "complete" }
+  ],
+  "dataflows": [
+    { "from": "fetch_data", "to": "validate" }
   ]
 }
 ```

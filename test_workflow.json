@@ -1,1 +1,1 @@
-{"nodes":[{"id":"echo","providers":[{"type":"subprocess","command":"cmd.exe /c echo hello"}],"process_timeout_secs":30,"predecessors":[]}]}
+{"nodes":[{"id":"echo","providers":[{"type":"subprocess","command":"cmd.exe /c echo hello"}],"process_timeout_secs":30}],"edges":[]}

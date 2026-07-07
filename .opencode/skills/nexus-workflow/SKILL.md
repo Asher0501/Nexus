@@ -55,18 +55,19 @@
     {
       "id": "step1",
       "providers": [{"type": "subprocess", "command": "命令1"}],
-      "process_timeout_secs": 30,
-      "predecessors": []
+      "process_timeout_secs": 30
     },
     {
       "id": "step2",
       "providers": [{"type": "subprocess", "command": "命令2"}],
-      "process_timeout_secs": 30,
-      "predecessors": [
-        {"node_id": "step1", "trigger": "all", "event": "complete"}
-      ],
-      "inputs": ["step1"]
+      "process_timeout_secs": 30
     }
+  ],
+  "edges": [
+    { "from": "step1", "to": "step2", "trigger": "all", "event": "complete" }
+  ],
+  "dataflows": [
+    { "from": "step1", "to": "step2" }
   ]
 }
 ```
@@ -75,45 +76,62 @@
 
 所有 AI 工具直接写完整的 CLI 命令，不需要包装脚本：
 
-**OpenCode：**
+**OpenCode（入口节点）：**
 ```json
 {
-  "id": "ai_task",
-  "providers": [{
-    "type": "subprocess",
-    "command": "opencode run --format json --dangerously-skip-permissions --model claude-sonnet-4 -- \"提示词内容\""
-  }],
-  "process_timeout_secs": 300,
-  "predecessors": []
+  "nodes": [
+    {
+      "id": "ai_task",
+      "providers": [{
+        "type": "subprocess",
+        "command": "opencode run --format json --dangerously-skip-permissions --model claude-sonnet-4 -- \"提示词内容\""
+      }],
+      "process_timeout_secs": 300
+    }
+  ]
 }
 ```
 
-**Claude Code：**
+**Claude Code（入口节点）：**
 ```json
 {
-  "id": "ai_task",
-  "providers": [{
-    "type": "subprocess",
-    "command": "claude -p \"提示词内容\" --output-format json --model claude-sonnet-4"
-  }],
-  "process_timeout_secs": 300,
-  "predecessors": []
+  "nodes": [
+    {
+      "id": "ai_task",
+      "providers": [{
+        "type": "subprocess",
+        "command": "claude -p \"提示词内容\" --output-format json --model claude-sonnet-4"
+      }],
+      "process_timeout_secs": 300
+    }
+  ]
 }
 ```
 
 **链式传递上游数据给 AI：**
 ```json
 {
-  "id": "ai_task",
-  "providers": [{
-    "type": "subprocess",
-    "command": "opencode run --format json --dangerously-skip-permissions -- \"{{inputs.config}}\""
-  }],
-  "process_timeout_secs": 300,
-  "predecessors": [
-    {"node_id": "config", "trigger": "all", "event": "complete"}
+  "nodes": [
+    {
+      "id": "config",
+      "providers": [{"type": "subprocess", "command": "echo 审查以下代码"}],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "ai_task",
+      "providers": [{
+        "type": "subprocess",
+        "command": "opencode run --format json --dangerously-skip-permissions -- \"{{inputs.config}}\""
+      }],
+      "process_timeout_secs": 300
+    }
   ],
-  "inputs": ["config"]
+  "edges": [
+    { "from": "config", "to": "ai_task", "trigger": "all", "event": "complete" }
+  ],
+  "dataflows": [
+    { "from": "config", "to": "ai_task" }
+  ]
 }
 ```
 
@@ -121,20 +139,19 @@
 
 生成完后检查：
 1. 所有节点 ID 唯一
-2. 入口节点的 `predecessors` 为 `[]`
-3. 非入口节点至少有一个 `predecessor`
-4. `process_timeout_secs` 对所有节点都设置了合理的值
-5. `edges` 中的 `from` 和 `to` 都存在于 `nodes` 中
-6. `dataflows` 中的 `from` 和 `to` 都存在于 `nodes` 中
-7. 分支路由的 `returns` 和 `exit_reason` 值匹配
-8. 模板插值 `{{inputs.X}}` 中的 X 在 `inputs` 数组中存在
+2. 入口节点在 `edges` 中没有入边
+3. `process_timeout_secs` 对所有节点都设置了合理的值
+4. `edges` 中的 `from` 和 `to` 都存在于 `nodes` 中
+5. `dataflows` 中的 `from` 和 `to` 都存在于 `nodes` 中
+6. 分支路由的 `returns` 和 `exit_reason` 值匹配
+7. 模板插值 `{{inputs.X}}` 中的 X 必须在 `dataflows` 中有对应的 `from` → 该节点 ID 的声明
 
 ## 规则速查
 
 | 规则 | 说明 |
 |------|------|
 | type | 仅支持 `"subprocess"` |
-| 入口节点 | `predecessors: []` |
+| 入口节点 | `edges` 中没有入边的节点 |
 | 唯一 ID | 所有节点 id 不可重复 |
 | threshold | 默认 1，大于 1 需要 N 次才触发 |
 | exit_reason | 精确字符串匹配 |

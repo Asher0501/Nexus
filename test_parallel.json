@@ -8,8 +8,7 @@
           "command": "C:\\Users\\Asher\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe run --format json --dangerously-skip-permissions --model deepseek/deepseek-chat -- analyze this code"
         }
       ],
-      "process_timeout_secs": 120,
-      "predecessors": []
+      "process_timeout_secs": 120
     },
     {
       "id": "review_b",
@@ -19,8 +18,7 @@
           "command": "C:\\Users\\Asher\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe run --format json --dangerously-skip-permissions --model deepseek/deepseek-chat -- check this code"
         }
       ],
-      "process_timeout_secs": 120,
-      "predecessors": []
+      "process_timeout_secs": 120
     },
     {
       "id": "review_c",
@@ -30,8 +28,8 @@
           "command": "C:\\Users\\Asher\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe run --format json --dangerously-skip-permissions --model deepseek/deepseek-chat -- improve this code"
         }
       ],
-      "process_timeout_secs": 120,
-      "predecessors": []
+      "process_timeout_secs": 120
     }
-  ]
+  ],
+  "edges": []
 }
