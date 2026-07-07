@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 
 use crate::model::provider::ProviderDef;
 
@@ -55,7 +55,7 @@ impl NodeExecutor {
         ctx: NodeContext,
         timeout: Duration,
         node_id: &str,
-        chunk_tx: Option<mpsc::UnboundedSender<NodeChunk>>,
+        chunk_tx: Option<Sender<NodeChunk>>,
     ) -> Result<NodeOutcome, SpawnError> {
         match self {
             NodeExecutor::Subprocess(exe) => {

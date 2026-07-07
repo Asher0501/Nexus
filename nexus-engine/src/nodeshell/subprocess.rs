@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Sender};
 
 use super::types::{NodeChunk, NodeContext, NodeOutcome, SpawnError};
 
@@ -91,7 +91,7 @@ impl SubprocessExecutor {
         ctx: NodeContext,
         timeout: Duration,
         node_id: &str,
-        chunk_tx: Option<mpsc::UnboundedSender<NodeChunk>>,
+        chunk_tx: Option<mpsc::Sender<NodeChunk>>,
     ) -> Result<NodeOutcome, SpawnError> {
         // Render template in command string ({{inputs.x}} → ctx.inputs[x]).
         let command = if self.command.contains("{{inputs.") {
@@ -117,10 +117,14 @@ impl SubprocessExecutor {
             message: e.to_string(),
         })?;
 
-        // Write context JSON to stdin, then close stdin to signal EOF.
+        // Write context JSON to stdin, then stdin drops → pipe closes → child sees EOF.
         if let Some(mut stdin) = child.stdin.take() {
-            let input = serde_json::to_string(&ctx).unwrap_or_default();
-            let _ = stdin.write_all(input.as_bytes()).await;
+            let input = serde_json::to_string(&ctx).map_err(|e| SpawnError {
+                message: format!("serialize context: {e}"),
+            })?;
+            stdin.write_all(input.as_bytes()).await.map_err(|e| SpawnError {
+                message: format!("stdin write failed: {e}"),
+            })?;
         }
 
         // Stream stdout/stderr and wait concurrently.
@@ -137,11 +141,48 @@ impl SubprocessExecutor {
 /// Uses `tokio::spawn` for the `wait()` future so that `child` is never
 /// mutably borrowed during the select loop (sidestepping the pinning
 /// conflict between `child.wait()` and `child.kill()`).
+fn process_line(
+    output_buf: &mut String,
+    text: &str,
+    log_mode: &mut bool,
+    exit_reason: &mut Option<String>,
+    chunk_tx: &Option<Sender<NodeChunk>>,
+    node_id: &str,
+) {
+    if *log_mode {
+        output_buf.push_str(text);
+        output_buf.push('\n');
+    } else if text == "__nexus_log_end" {
+        *log_mode = true;
+    } else if let Some(rest) = text.strip_prefix("__nexus_log:") {
+        tracing::info!(target: "nexus::node::log", node_id, log = rest.trim());
+    } else if let Some(rest) = text.strip_prefix("__nexus_exit_reason:") {
+        *exit_reason = Some(rest.trim().to_string());
+    } else if let Some(rest) = text.strip_prefix("__nexus_event:") {
+        let event_text = rest.trim();
+        if !event_text.is_empty() {
+            output_buf.push_str(event_text);
+            output_buf.push('\n');
+            tracing::info!(target: "nexus::node::event", node_id, event = event_text);
+        }
+    } else {
+        output_buf.push_str(text);
+        output_buf.push('\n');
+        if let Some(tx) = chunk_tx {
+            // Chunk channel full is safe — NodeOutcome.output has full content
+            let _ = tx.try_send(NodeChunk {
+                text: text.to_string(),
+                node_id: node_id.to_string(),
+            });
+        }
+    }
+}
+
 async fn stream_and_wait(
     mut child: Child,
     timeout: Duration,
     node_id: &str,
-    chunk_tx: Option<mpsc::UnboundedSender<NodeChunk>>,
+    chunk_tx: Option<Sender<NodeChunk>>,
 ) -> Result<NodeOutcome, SpawnError> {
     let out_pipe = child.stdout.take();
     let err_pipe = child.stderr.take();
@@ -155,8 +196,8 @@ async fn stream_and_wait(
     let _stream_protocol = false;
 
     // Spawn background line readers for stdout/stderr pipes.
-    let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (stderr_tx, mut stderr_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel::<String>(1024);
+    let (stderr_tx, mut stderr_rx) = tokio::sync::mpsc::channel::<String>(1024);
 
     if let Some(pipe) = out_pipe {
         let tx = stdout_tx;
@@ -164,7 +205,8 @@ async fn stream_and_wait(
             let mut lines = BufReader::new(pipe).lines();
             loop {
                 match lines.next_line().await {
-                    Ok(Some(l)) => { let _ = tx.send(l); }
+                    // Channel send failure: receiver dropped (task cancelled) — exit cleanly.
+                    Ok(Some(l)) => { let _ = tx.send(l).await; }
                     _ => break,
                 }
             }
@@ -176,7 +218,8 @@ async fn stream_and_wait(
             let mut lines = BufReader::new(pipe).lines();
             loop {
                 match lines.next_line().await {
-                    Ok(Some(l)) => { let _ = tx.send(l); }
+                    // Channel send failure: receiver dropped (task cancelled) — exit cleanly.
+                    Ok(Some(l)) => { let _ = tx.send(l).await; }
                     _ => break,
                 }
             }
@@ -190,10 +233,15 @@ async fn stream_and_wait(
     tokio::spawn(async move {
         let waited = tokio::time::timeout(timeout, child.wait()).await;
         match waited {
+            // Oneshot send failure: receiver dropped (stream_and_wait already exited) — safe to ignore.
             Ok(Ok(s)) => { let _ = exit_tx.send((s.code().unwrap_or(-1), false)); }
+            // Oneshot send failure: receiver dropped (stream_and_wait already exited) — safe to ignore.
             Ok(Err(_)) => { let _ = exit_tx.send((-1, false)); }
             Err(_elapsed) => {
-                let _ = child.kill().await;
+                if let Err(e) = child.kill().await {
+                    tracing::warn!(target: "nexus::node", "failed to kill timed-out child: {e}");
+                }
+                // Oneshot send failure: receiver dropped (stream_and_wait already exited) — safe to ignore.
                 let _ = exit_tx.send((-1, true));
             }
         }
@@ -203,33 +251,14 @@ async fn stream_and_wait(
     loop {
         tokio::select! {
             Some(text) = stdout_rx.recv() => {
-                if log_mode {
-                    output_buf.push_str(&text);
-                    output_buf.push('\n');
-                } else if text == "__nexus_log_end" {
-                    log_mode = true;
-                } else if text.starts_with("__nexus_log:") {
-                    let rest = text.strip_prefix("__nexus_log:").unwrap_or("").trim();
-                    tracing::info!(target: "nexus::node::log", node_id, log = rest);
-                } else if let Some(rest) = text.strip_prefix("__nexus_exit_reason:") {
-                    exit_reason = Some(rest.trim().to_string());
-                } else if let Some(rest) = text.strip_prefix("__nexus_event:") {
-                    let event_text = rest.trim();
-                    if !event_text.is_empty() {
-                        output_buf.push_str(event_text);
-                        output_buf.push('\n');
-                        tracing::info!(target: "nexus::node::event", node_id, event = event_text);
-                    }
-                } else {
-                    output_buf.push_str(&text);
-                    output_buf.push('\n');
-                    if let Some(ref tx) = chunk_tx {
-                        let _ = tx.send(NodeChunk {
-                            text: text.clone(),
-                            node_id: node_id.to_string(),
-                        });
-                    }
-                }
+                process_line(
+                    &mut output_buf,
+                    &text,
+                    &mut log_mode,
+                    &mut exit_reason,
+                    &chunk_tx,
+                    node_id,
+                );
             }
             Some(text) = stderr_rx.recv() => {
                 tracing::warn!(target: "nexus::node::stderr", node_id, stderr = text);
@@ -244,35 +273,38 @@ async fn stream_and_wait(
         }
     }
 
-    // Drain remaining channel lines (fast path, no blocking).
-    loop {
-        let mut got = false;
+    // After exit signal, drain remaining lines efficiently.
+    // Uses a short sleep to avoid busy-waiting, allowing the
+    // line-reader task time to flush final lines.
+    for _ in 0..5 {
         while let Ok(text) = stdout_rx.try_recv() {
-            got = true;
-            if log_mode {
-                output_buf.push_str(&text);
-                output_buf.push('\n');
-            } else if text.starts_with("__nexus_log:") {
-                let rest = text.strip_prefix("__nexus_log:").unwrap_or("").trim();
-                tracing::info!(target: "nexus::node::log", node_id, log = rest);
-            } else if let Some(rest) = text.strip_prefix("__nexus_exit_reason:") {
-                exit_reason = Some(rest.trim().to_string());
-            } else if let Some(rest) = text.strip_prefix("__nexus_event:") {
-                let event_text = rest.trim();
-                if !event_text.is_empty() {
-                    output_buf.push_str(event_text);
-                    output_buf.push('\n');
-                }
-            } else {
-                output_buf.push_str(&text);
-                output_buf.push('\n');
-            }
+            process_line(
+                &mut output_buf,
+                &text,
+                &mut log_mode,
+                &mut exit_reason,
+                &chunk_tx,
+                node_id,
+            );
         }
         while let Ok(text) = stderr_rx.try_recv() {
-            got = true;
             tracing::warn!(target: "nexus::node::stderr", node_id, stderr = text);
         }
-        if !got { break; }
+        tokio::time::sleep(Duration::from_micros(200)).await;
+    }
+    // Final drain
+    while let Ok(text) = stdout_rx.try_recv() {
+        process_line(
+            &mut output_buf,
+            &text,
+            &mut log_mode,
+            &mut exit_reason,
+            &chunk_tx,
+            node_id,
+        );
+    }
+    while let Ok(text) = stderr_rx.try_recv() {
+        tracing::warn!(target: "nexus::node::stderr", node_id, stderr = text);
     }
 
     if output_buf.ends_with('\n') {

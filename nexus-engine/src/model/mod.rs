@@ -6,7 +6,7 @@
 //! - [`PredecessorDef`]: Declarations of predecessor relationships
 //! - [`ProviderDef`]: How a node is executed (subprocess, HTTP, etc.)
 //! - [`EngineConfig`]: Runtime engine configuration
-//! - [`ValidationError`] and [`BuildError`]: Error types
+//! - [`ValidationError`]: Error types
 
 /// Workflow and node definitions (`WorkflowDef`, `NodeDef`).
 pub mod workflow;
@@ -20,7 +20,7 @@ pub mod predecessor;
 /// Engine runtime configuration (`EngineConfig`).
 pub mod config;
 
-/// Error types for validation and build phases (`ValidationError`, `BuildError`).
+/// Error types for validation and build phases (`ValidationError`).
 pub mod error;
 
 pub use workflow::{WorkflowDef, NodeDef};
@@ -29,7 +29,7 @@ pub use predecessor::{
     default_threshold, DataFlowDef, EventType, PredecessorDef, SchedulingEdgeDef, TriggerExpr,
 };
 pub use config::EngineConfig;
-pub use error::{ValidationError, BuildError};
+pub use error::ValidationError;
 
 #[cfg(test)]
 mod tests {
@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn test_engine_config_defaults() {
         let config = EngineConfig::default();
-        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.max_timeout_retries, 3);
         assert_eq!(config.default_node_timeout_secs, 3600);
     }
 
@@ -126,8 +126,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_error_display() {
-        let err = BuildError::InvalidNodeIndex { description: "index out of bounds".into() };
+    fn test_build_invariant_display() {
+        let err = ValidationError::BuildInvariant { description: "index out of bounds".into() };
         assert!(!err.to_string().is_empty());
     }
 
@@ -412,6 +412,7 @@ mod tests {
             ValidationError::InvalidPredecessor { node_id: "e".into(), predecessor_id: "f".into() },
             ValidationError::InputSourceNotFound { node_id: "g".into(), source_id: "h".into() },
             ValidationError::InputSourceUnreachable { node_id: "i".into(), source_id: "j".into() },
+            ValidationError::BuildInvariant { description: "k".into() },
         ];
 
         for (i, err) in cases.iter().enumerate() {

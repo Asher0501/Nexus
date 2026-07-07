@@ -61,6 +61,12 @@ pub enum ValidationError {
         /// The input source node ID that is unreachable.
         source_id: String,
     },
+
+    /// Graph invariant violation during construction.
+    BuildInvariant {
+        /// Human-readable description of which invariant failed.
+        description: String,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -115,30 +121,11 @@ impl fmt::Display for ValidationError {
                     source_id, node_id
                 )
             }
-        }
-    }
-}
-
-impl std::error::Error for ValidationError {}
-
-/// Errors returned during the graph building phase.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BuildError {
-    /// A NodeIndex referenced in edges does not exist in the graph.
-    InvalidNodeIndex {
-        /// Description of the invalid index.
-        description: String,
-    },
-}
-
-impl fmt::Display for BuildError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidNodeIndex { description } => {
-                write!(f, "invalid node index: {}", description)
+            Self::BuildInvariant { description } => {
+                write!(f, "build invariant failure: {description}")
             }
         }
     }
 }
 
-impl std::error::Error for BuildError {}
+impl std::error::Error for ValidationError {}

@@ -6,7 +6,7 @@ fn default_node_timeout() -> u64 {
     3600
 }
 
-fn default_max_retries() -> u64 {
+fn default_max_timeout_retries() -> u64 {
     3
 }
 
@@ -23,10 +23,10 @@ pub struct EngineConfig {
     #[serde(default = "default_node_timeout")]
     pub default_node_timeout_secs: u64,
 
-    /// Maximum number of retries for a failed node.
-    /// Defaults to 3.
-    #[serde(default = "default_max_retries")]
-    pub max_retries: u64,
+    /// Maximum retries for timed out or spawn-failed nodes (default: 3).
+    /// Exit-code failures are NOT automatically retried.
+    #[serde(default = "default_max_timeout_retries")]
+    pub max_timeout_retries: u64,
 }
 
 impl Default for EngineConfig {
@@ -34,7 +34,7 @@ impl Default for EngineConfig {
         Self {
             max_concurrency: None,
             default_node_timeout_secs: default_node_timeout(),
-            max_retries: default_max_retries(),
+            max_timeout_retries: default_max_timeout_retries(),
         }
     }
 }
@@ -44,12 +44,12 @@ impl EngineConfig {
     pub fn new(
         max_concurrency: Option<usize>,
         default_node_timeout_secs: u64,
-        max_retries: u64,
+        max_timeout_retries: u64,
     ) -> Self {
         Self {
             max_concurrency,
             default_node_timeout_secs,
-            max_retries,
+            max_timeout_retries,
         }
     }
 

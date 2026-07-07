@@ -8,7 +8,7 @@ use std::collections::{HashMap, VecDeque};
 
 use petgraph::graph::NodeIndex;
 
-use crate::graph::edge::{EdgeDef, EdgeState, Strategy};
+use crate::graph::edge::{EdgeDef, EdgeState};
 use crate::graph::graph_def::{GraphDef, NodeTransfer};
 use crate::model::predecessor::EventType;
 
@@ -156,14 +156,15 @@ impl Scheduler {
     /// exit_reason), the edge fires and the target node is returned in the
     /// result vector.
     ///
-    /// # Algorithm (NODE_TRANSFER.md §5.1)
+    /// # Algorithm
     ///
     /// For each outgoing edge of `node`:
     /// 1. Skip if the edge has already triggered
     /// 2. Skip if the edge's event type does not match the incoming event
     /// 3. Skip if the edge has an exit_reason filter that does not match
-    /// 4. For `Strategy::All`: add `node` to the received set; skip the edge
-    ///    if not all `from_nodes` have signalled yet
+    /// 4. For `Strategy::All`: skip the edge if the sending `node` is not
+    ///    the edge's `from` node (edge no longer tracks multi-source via
+    ///    received set — convergence is handled by the engine)
     /// 5. Increment the edge's event counter
     /// 6. If the counter meets or exceeds the threshold and the edge hasn't
     ///    fired: mark as triggered and enqueue the target node
@@ -242,19 +243,11 @@ impl Scheduler {
                 }
             }
 
-            // 4. Strategy: All — need all from_nodes to signal.
-            if matches!(edge.strategy, Strategy::All) {
-                es.received.insert(node);
-                if es.received.len() < edge.from_nodes.len() {
-                    continue;
-                }
-            }
-
-            // 5. Increment counter.
+            // 4. Increment counter.
             es.event_count += 1;
 
-            // 6. Check threshold and trigger.
-            if es.event_count >= edge.threshold && !es.triggered {
+            // 5. Check threshold and trigger.
+            if es.event_count >= edge.threshold {
                 es.triggered = true;
                 ready.push(edge.to);
             }
@@ -288,8 +281,10 @@ impl Scheduler {
 
     /// Attempt to retry a failed node.
     ///
-    /// Resets the node's state to `Pending` and `NodeResult::None`, and
-    /// enqueues it. Returns `false` if the retry limit has been reached.
+    /// Resets the node's state to `Pending` and `NodeResult::None`, resets
+    /// the outgoing edge states so they can fire again, and enqueues the
+    /// node for re-execution. Returns `false` if the retry limit has been
+    /// reached.
     pub fn retry_node(&mut self, node: NodeIndex, max_retries: u64) -> bool {
         let count = self.state.retry_counts.get_mut(&node);
         let count = match count {
@@ -307,6 +302,16 @@ impl Scheduler {
         if let Some(ns) = self.state.states.get_mut(&node) {
             ns.status = NodeStatus::Pending;
             ns.result = NodeResult::None;
+        }
+
+        // Reset outgoing edge states so they can fire again on re-execution.
+        if let Some(transfer) = self.graph.transfers().get(&node) {
+            for &edge_idx in &transfer.out_edge_indices {
+                if let Some(es) = self.state.edge_states.get_mut(edge_idx) {
+                    es.triggered = false;
+                    es.event_count = 0;
+                }
+            }
         }
 
         // Enqueue for re-execution.
@@ -378,16 +383,14 @@ mod tests {
         index.insert("A".into(), a);
         index.insert("B".into(), b);
 
-        let edge = EdgeDef {
-            from_nodes: vec![a],
+        let edges = vec![EdgeDef {
+            from: a,
             to: b,
             event_type: EventType::Complete,
             exit_reason: None,
             threshold: 1,
             strategy: Strategy::All,
-        };
-
-        let edges = vec![edge];
+        }];
         let mut transfers = HashMap::new();
         transfers.insert(
             a,
@@ -445,15 +448,18 @@ mod tests {
         index.insert("B".into(), b);
         index.insert("C".into(), c);
 
-        let edge = EdgeDef {
-            from_nodes: vec![a, b],
-            to: c,
-            event_type: EventType::Complete,
-            exit_reason: None,
-            threshold: 1,
-            strategy: Strategy::All,
-        };
-        let edges = vec![edge];
+        let edges = vec![
+            EdgeDef {
+                from: a, to: c,
+                event_type: EventType::Complete, exit_reason: None, threshold: 1,
+                strategy: Strategy::All,
+            },
+            EdgeDef {
+                from: b, to: c,
+                event_type: EventType::Complete, exit_reason: None, threshold: 1,
+                strategy: Strategy::All,
+            },
+        ];
 
         let mut transfers = HashMap::new();
         transfers.insert(
@@ -467,7 +473,7 @@ mod tests {
             b,
             NodeTransfer {
                 from: b,
-                out_edge_indices: vec![0],
+                out_edge_indices: vec![1],
             },
         );
         transfers.insert(
@@ -524,7 +530,7 @@ mod tests {
 
         let edges = vec![
             EdgeDef {
-                from_nodes: vec![a],
+                from: a,
                 to: b,
                 event_type: EventType::Complete,
                 exit_reason: None,
@@ -532,7 +538,7 @@ mod tests {
                 strategy: Strategy::All,
             },
             EdgeDef {
-                from_nodes: vec![a],
+                from: a,
                 to: c,
                 event_type: EventType::Complete,
                 exit_reason: None,
@@ -646,14 +652,18 @@ mod tests {
         index.insert("B".into(), b);
         index.insert("C".into(), c);
 
-        let edges = vec![EdgeDef {
-            from_nodes: vec![a, b],
-            to: c,
-            event_type: EventType::Complete,
-            exit_reason: None,
-            threshold: 1,
-            strategy: Strategy::Any,
-        }];
+        let edges = vec![
+            EdgeDef {
+                from: a, to: c,
+                event_type: EventType::Complete, exit_reason: None, threshold: 1,
+                strategy: Strategy::Any,
+            },
+            EdgeDef {
+                from: b, to: c,
+                event_type: EventType::Complete, exit_reason: None, threshold: 1,
+                strategy: Strategy::Any,
+            },
+        ];
 
         let mut transfers = HashMap::new();
         transfers.insert(
@@ -667,7 +677,7 @@ mod tests {
             b,
             NodeTransfer {
                 from: b,
-                out_edge_indices: vec![0],
+                out_edge_indices: vec![1],
             },
         );
         transfers.insert(
@@ -698,40 +708,32 @@ mod tests {
 
         let mut scheduler = Scheduler::new(graph_def);
 
-        // A completes → edge should fire (Any, threshold=1).
+        // A completes → edge 0 (A→C) fires (Any, threshold=1). C is ready.
         let ready = scheduler.handle_event(a, EventType::Complete, None);
-        assert_eq!(ready.len(), 1, "A completing should trigger edge with Strategy::Any");
+        assert_eq!(ready.len(), 1, "A completing should trigger its edge to C");
         assert_eq!(ready[0], c, "edge should target C");
 
-        // Edge is already triggered, B should not re-trigger.
+        // B completes → edge 1 (B→C) fires separately (different edge idx).
         let ready2 = scheduler.handle_event(b, EventType::Complete, None);
-        assert!(
-            ready2.is_empty(),
-            "already-triggered edge should not fire again"
-        );
+        assert_eq!(ready2.len(), 1, "B's separate edge should also fire");
+        assert_eq!(ready2[0], c, "B's edge should also target C");
     }
 
-    // ── 4. Strategy: All (requires all from_nodes) ────────
+    // ── 4. Fan-in: each from-node has its own edge ────────
 
     #[test]
-    fn test_strategy_all_requires_all_nodes() {
+    fn test_fan_in_triggers_separate_edges() {
         let mut scheduler = Scheduler::new(build_fan_in_graph());
         let a_idx = scheduler.graph().node_index("A").expect("A should exist");
 
-        // A completes alone — not enough for All strategy.
+        // A completes → edge 0 (A→C) fires immediately.
         let ready = scheduler.handle_event(a_idx, EventType::Complete, None);
-        assert!(
-            ready.is_empty(),
-            "A alone should not trigger All edge"
-        );
+        assert_eq!(ready.len(), 1, "A triggers its own edge to C");
 
         let b_idx = scheduler.graph().node_index("B").expect("B should exist");
+        // B completes → edge 1 (B→C) fires separately.
         let ready = scheduler.handle_event(b_idx, EventType::Complete, None);
-        assert_eq!(
-            ready.len(),
-            1,
-            "both A and B completing should trigger All edge"
-        );
+        assert_eq!(ready.len(), 1, "B triggers its own edge to C");
     }
 
     // ── 5. Threshold > 1 ──────────────────────────────────
@@ -758,7 +760,7 @@ mod tests {
         index.insert("B".into(), b);
 
         let edges = vec![EdgeDef {
-            from_nodes: vec![a],
+            from: a,
             to: b,
             event_type: EventType::Complete,
             exit_reason: None,
@@ -839,7 +841,7 @@ mod tests {
         index.insert("B".into(), b);
 
         let edges = vec![EdgeDef {
-            from_nodes: vec![a],
+            from: a,
             to: b,
             event_type: EventType::Complete,
             exit_reason: Some("ok".into()),
@@ -924,6 +926,59 @@ mod tests {
         );
     }
 
+    // ── 7b. Retry resets edge state ────────────────────────
+
+    #[test]
+    fn test_retry_node_resets_edge_state() {
+        // A → B. A completes → edge fires. retry_node → edge reset.
+        // After reset, handle_event again → B is re-triggered.
+        let mut scheduler = Scheduler::new(build_chain_graph());
+        let a = scheduler.graph().node_index("A").expect("A exists");
+        let b = scheduler.graph().node_index("B").expect("B exists");
+
+        // First completion: edge fires, B is made ready.
+        let ready = scheduler.handle_event(a, EventType::Complete, None);
+        assert_eq!(ready.len(), 1, "A should trigger B");
+        assert_eq!(ready[0], b, "should target B");
+
+        // Verify edge is triggered.
+        assert!(
+            scheduler.state.edge_states[0].triggered,
+            "edge should be triggered after first fire"
+        );
+
+        // Retry resets edge state.
+        assert!(scheduler.retry_node(a, 3), "retry should succeed");
+        assert!(
+            !scheduler.state.edge_states[0].triggered,
+            "edge triggered should be reset after retry"
+        );
+        assert_eq!(
+            scheduler.state.edge_states[0].event_count,
+            0,
+            "edge event_count should be cleared after retry"
+        );
+
+        // Verify node state was reset.
+        assert_eq!(
+            scheduler.state.states[&a].status,
+            NodeStatus::Pending,
+            "retried node should be Pending"
+        );
+
+        // Second completion: B is triggered again (edge was reset).
+        let ready2 = scheduler.handle_event(a, EventType::Complete, None);
+        assert_eq!(
+            ready2.len(),
+            1,
+            "retried A should re-trigger B"
+        );
+        assert_eq!(
+            ready2[0], b,
+            "retried A should re-trigger B"
+        );
+    }
+
     // ── 8. Triggered edge prevents re-fire ────────────────
 
     #[test]
@@ -932,15 +987,15 @@ mod tests {
         let a = scheduler.graph().node_index("A").expect("A should exist");
         let b = scheduler.graph().node_index("B").expect("B should exist");
 
-        // First: A completes (not enough for All).
-        let _r1 = scheduler.handle_event(a, EventType::Complete, None);
+        // First: A completes → edge 0 (A→C) fires.
+        let r1 = scheduler.handle_event(a, EventType::Complete, None);
+        assert_eq!(r1.len(), 1);
 
-        // B completes (All satisfied, edge fires).
+        // B completes → edge 1 (B→C) fires.
         let r2 = scheduler.handle_event(b, EventType::Complete, None);
         assert_eq!(r2.len(), 1);
 
-        // B completes again (already triggered).
-        // Reset B's state to simulate re-execution.
+        // B completes again → edge 1 already triggered.
         let r3 = scheduler.handle_event(b, EventType::Complete, None);
         assert!(
             r3.is_empty(),
