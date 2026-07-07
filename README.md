@@ -183,23 +183,26 @@ DataRouter → 存储输出，传递给下游
 
 ```
 for each out_edge of completed_node:
-  1. 如果边已被触发，跳过
+  1. 如果边已被触发（triggered=true），跳过
   2. 如果事件类型不匹配，跳过
   3. 如果 exit_reason 配置了且不匹配，跳过
-  4. All 策略：如果 received 未包含所有上游，跳过
-  5. event_count++
-  6. event_count >= threshold → triggered=true, 入队目标节点
+  4. event_count++                              ← 每条边有独立计数器
+  5. 如果 event_count >= threshold 且 !triggered：
+     → triggered = true
+     → 目标节点入队（NodeReady）
 ```
+
+fan-in 场景（A 和 B 完成后触发 C）通过两条独立边实现。
 
 ### 重试机制
 
-节点 Failed 或 Timeout 后，默认最多重试 3 次：
+重试仅对 **Timeout** 和 **SpawnError**（子进程启动失败）生效。exit-code 失败（exit_code ≠ 0）不自动重试，直接走 Failed 出边。
 
 ```
-节点 Failed/Timeout
+节点 Timeout / SpawnError
   → retry_count < max_retries (默认 3)?
     → retry_count++ → 重新执行节点
-  → 否则触发 Failed/Timeout 出边
+  → 否则触发 Timeout/Failed 出边
 ```
 
 ## CLI
@@ -208,7 +211,10 @@ for each out_edge of completed_node:
 nexus-cli run <workflow.json>
 
   --max-concurrency N    最大并发节点数（默认：CPU 核数）
-  --node-timeout S       节点默认超时秒数（默认：3600）
+  --node-timeout S       节点默认超时秒数（默认：3600），被节点级
+                         process_timeout_secs 覆盖
+  --max-timeout-retries N
+                         超时和 spawn 失败的重试次数（默认：3）
   --verbose              详细日志（含流式 chunk 输出）
   --validate-only        仅验证，不执行
   --dump-state           输出节点状态快照
