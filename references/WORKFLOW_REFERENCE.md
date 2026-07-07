@@ -31,9 +31,10 @@
    - [4.1 通信流程](#41-通信流程)
    - [4.2 stdin 输入格式](#42-stdin-输入格式)
    - [4.3 stdout 输出格式](#43-stdout-输出格式)
-   - [4.4 行协议前缀](#44-行协议前缀)
-   - [4.5 退出码](#45-退出码)
-   - [4.6 exit_reason 设置](#46-exit_reason-设置)
+    - [4.4 stderr 处理](#44-stderr-处理)
+    - [4.5 行协议前缀](#45-行协议前缀)
+    - [4.6 退出码](#46-退出码)
+    - [4.7 exit_reason 设置](#47-exit_reason-设置)
 5. [流式输出](#5-流式输出)
    - [5.1 NodeChunk 机制](#51-nodechunk-机制)
    - [5.2 实时事件上报](#52-实时事件上报)
@@ -52,6 +53,10 @@
    - [7.3 链式 AI 处理管道](#73-链式-ai-处理管道)
    - [7.4 逐级上报审批流程](#74-逐级上报审批流程)
 8. [边界情况与限制](#8-边界情况与限制)
+9. [CLI 参考与调试](#9-cli-参考与调试)
+   - [9.1 CLI 用法](#91-cli-用法)
+   - [9.2 验证错误速查](#92-验证错误速查)
+   - [9.3 通用调试步骤](#93-通用调试步骤)
 
 ---
 
@@ -78,6 +83,7 @@
 - 入口节点 = 在 `edges` 中没有入边的节点。Builder 自动识别。
 - 至少有一个入口节点，否则 Validator 报 `NoEntryNode`。
 - 所有节点都必须在调度拓扑中从入口可达，否则报 `UnreachableNode`。
+- 同时做反向检查：所有节点必须能通过边链到达某个出口（无出边的节点），否则报 `ExitNotReachable`。
 - 节点按在 `nodes[]` 中的定义顺序编号，此顺序影响图的拓扑结构。
 
 ---
@@ -108,7 +114,7 @@
 - `id` 必须在整个 `WorkflowDef.nodes[]` 中唯一。重复则报 `DuplicateNodeId`。
 - `providers` 为空数组时，Validator 报 `NoValidProvider`。
 - `providers` 数组支持多个元素，但引擎**仅使用第一个 provider**执行节点。其余元素预留。
-- `returns` 非空时，节点可以通过 stdout 首行 `__nexus_exit_reason:` 设置返回值，引擎据此做分支路由。
+- `returns` 非空时，节点可以通过 stdout 中写入 `__nexus_exit_reason:` 设置返回值（可在任意位置），引擎据此做分支路由。
 - `process_timeout_secs` 必须是正数。传入 0 会导致节点立即超时，当前无编译期检查。
 
 ---
@@ -224,12 +230,13 @@ for each out_edge of completed_node:
   1. 如果边已被触发（triggered=true），跳过
   2. 如果事件类型不匹配，跳过
   3. 如果 exit_reason 配置了且不匹配，跳过
-  4. All 策略：如果 received 集合未包含所有 from_nodes，跳过
-  5. event_count++
-  6. 如果 event_count >= threshold 且 !triggered：
+  4. event_count++                              ← 每条边有独立计数器
+  5. 如果 event_count >= threshold 且 !triggered：
      → triggered = true
      → 目标节点入队（NodeReady）
 ```
+
+fan-in 场景（A 和 B 完成后触发 C）通过两条独立边实现，每条边各自的计数器独立触发。
 
 ### 2.2 All vs Any
 
@@ -901,6 +908,16 @@ config (提供 prompt) → llm_review (AI review) → report (输出报告)
 - 如果自环边 `threshold = 1` 且节点没有其他出边 → Validator 报 `CycleWithoutEntry`
 - 如果自环边 `threshold > 1` → 节点执行 N 次后触发下游
 
+**重要：自环节点第一次执行需要从入口可达。** 仅有一条自环边但没有任何入边的节点永远不会被触发——因为没有 entry 节点或上游节点能启动它。
+
+**自环的典型模式：**
+```
+entry_node ──Complete/threshold=1──→ collector   ← entry 触发第一次
+collector  ──Complete/threshold=3──→ collector   ← 自环负责重复
+collector  ──Complete/threshold=3──→ aggregator  ← 3 次后触发下游
+```
+collector 由 entry_node 触发首次执行，之后自环边负责后续 2 次重复（threshold=3 需要 3 次事件），第 3 次完成后触发 aggregator。
+
 ### 8.4 输出大小限制
 
 - 单节点 stdout 输出不应超过 100MB
@@ -955,12 +972,12 @@ nexus-cli run <workflow.json>
 | `duplicate node ID: 'X'` | 两个节点 ID 相同 |
 | `no entry node: all nodes have predecessors` | 所有节点都有入边，没有入口节点 |
 | `unreachable node 'X': not reachable from any entry node` | 节点在调度图中不可达 |
-| `exit not reachable from node 'X'` | 节点无法到达任何出口 |
-| `cycle without entry: deadlock detected` | 存在无入口的环（可能自环 threshold=1） |
+| `cycle without entry: deadlock detected` | 存在无入口的环（可能自环 threshold=1，或多个节点形成环路且环内无入口节点） |
+| `exit not reachable from node 'X'` | 节点 X 没有路径到达任何出口节点（无出边的节点）。检查 X 的出边是否指向了可达出口的路径 |
 | `node 'X' has no valid provider` | providers 数组为空 |
 | `node 'X' references non-existent predecessor 'Y'` | edges 中 from/to 引用了不存在的节点 ID |
 | `input source 'Y' for node 'X' is not reachable from any entry` | dataflows 中 from 节点不可达 |
-| `build invariant failure: ...` | 内部图构建不变量被违反（应报告 bug） |
+| `build invariant failure: ...` | 内部图构造不变量检查失败。通常由不完整的节点/边配置引起：所有节点必须有 params 和 transfer 函数、所有边必须被某个 transfer 引用。排查节点 ID 引用和 `dataflows` 声明是否完整 |
 
 ### 9.3 通用调试步骤
 

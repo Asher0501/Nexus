@@ -162,7 +162,7 @@
 
 - **完整参考（本地机密）**: `references/WORKFLOW_REFERENCE.md`（所有 schema、机制、模式模板、边界情况的唯一权威来源）
 - **Architecture**: `references/WORKFLOW_REFERENCE.md §1-3`
-- **Node Protocol**: `references/WORKFLOW_REFERENCE.md §4`
+- **Node Protocol**: `references/WORKFLOW_REFERENCE.md §4`（含 stdin/EOF 协议和 stderr 行为）
 - **Mode Templates**: `references/WORKFLOW_REFERENCE.md §6`
 - **Integration Examples**: `references/WORKFLOW_REFERENCE.md §7`
 - **CLI & Debugging**: `references/WORKFLOW_REFERENCE.md §9`
