@@ -10,3 +10,6 @@ use serde_json as _;
 use tempfile as _;
 use tokio as _;
 use tracing_subscriber as _;
+
+#[cfg(windows)]
+use winapi as _;

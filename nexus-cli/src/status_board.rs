@@ -187,8 +187,12 @@ impl StatusBoard {
         }
 
         self.drawn_lines.store(lines_this_frame, Ordering::Relaxed);
-        let _ = std::io::stderr().write_all(&out);
-        let _ = std::io::stderr().flush();
+        if let Err(e) = std::io::stderr().write_all(&out) {
+            tracing::warn!(target: "nexus::status_board", "stderr write: {e}");
+        }
+        if let Err(e) = std::io::stderr().flush() {
+            tracing::warn!(target: "nexus::status_board", "stderr flush: {e}");
+        }
     }
 
     /// Clear the board from the terminal (for final cleanup).
@@ -204,8 +208,12 @@ impl StatusBoard {
                 out.extend_from_slice(CSI_ERASE);
                 out.extend_from_slice(NL);
             }
-            let _ = std::io::stderr().write_all(&out);
-            let _ = std::io::stderr().flush();
+            if let Err(e) = std::io::stderr().write_all(&out) {
+                tracing::warn!(target: "nexus::status_board", "stderr write: {e}");
+            }
+            if let Err(e) = std::io::stderr().flush() {
+                tracing::warn!(target: "nexus::status_board", "stderr flush: {e}");
+            }
         }
     }
 
