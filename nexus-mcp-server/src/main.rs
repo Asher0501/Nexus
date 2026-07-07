@@ -1,10 +1,11 @@
 //! Nexus MCP Server — JSON-RPC stdio-based MCP server for the Nexus engine.
 //!
 //! This binary exposes the nexus-engine as an MCP tool via stdin/stdout.
-//! It supports three methods:
+//! It supports four methods:
 //! - `validate_workflow` — validate a workflow JSON string
 //! - `parse_workflow` — parse a workflow JSON into structured output
 //! - `describe_schema` — return the WorkflowDef JSON schema
+//! - `run_workflow` — parse and execute a workflow
 
 use std::io::{self, BufRead, Write};
 
@@ -12,7 +13,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use nexus_engine::graph::validate;
-use nexus_engine::model::WorkflowDef;
+use nexus_engine::model::{EngineConfig, WorkflowDef};
+use nexus_engine::runtime::Engine;
 
 /// JSON-RPC success response envelope.
 #[derive(Debug, Serialize)]
@@ -64,7 +66,7 @@ fn extract_json_str(params: &Value) -> Result<String, String> {
         .ok_or_else(|| "Missing required parameter: workflow_json".into())
 }
 
-fn handle_validate(params: &Value, id: &Value) -> Value {
+async fn handle_validate(params: &Value, id: &Value) -> Value {
     let json_str = match extract_json_str(params) {
         Ok(s) => s,
         Err(e) => {
@@ -94,7 +96,7 @@ fn handle_validate(params: &Value, id: &Value) -> Value {
     }
 }
 
-fn handle_parse(params: &Value, id: &Value) -> Value {
+async fn handle_parse(params: &Value, id: &Value) -> Value {
     let json_str = match extract_json_str(params) {
         Ok(s) => s,
         Err(e) => {
@@ -122,7 +124,7 @@ fn handle_parse(params: &Value, id: &Value) -> Value {
     }
 }
 
-fn handle_describe_schema(id: &Value) -> Value {
+async fn handle_describe_schema(id: &Value) -> Value {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -193,7 +195,7 @@ fn handle_describe_schema(id: &Value) -> Value {
                             "type": "array",
                             "items": {"type": "string"}
                         },
-                        "max_retries": {
+                        "max_timeout_retries": {
                             "type": "integer",
                             "minimum": 0
                         }
@@ -206,7 +208,37 @@ fn handle_describe_schema(id: &Value) -> Value {
     make_success(serde_json::json!({"schema": schema}), id.clone())
 }
 
-fn main() {
+async fn handle_run(params: &Value, id: &Value) -> Value {
+    let json_str = match extract_json_str(params) {
+        Ok(s) => s,
+        Err(e) => return make_error(-32602, e, id.clone()),
+    };
+
+    let def: WorkflowDef = match serde_json::from_str(&json_str) {
+        Ok(d) => d,
+        Err(e) => return make_error(-32602, format!("Parse error: {e}"), id.clone()),
+    };
+
+    let config = EngineConfig::default();
+    let mut engine = match Engine::new(def, config, None) {
+        Ok(e) => e,
+        Err(errors) => {
+            let err_strs: Vec<String> = errors.iter().map(std::string::ToString::to_string).collect();
+            return make_success(
+                serde_json::json!({"valid": false, "errors": err_strs}),
+                id.clone(),
+            );
+        }
+    };
+
+    match engine.run().await {
+        Ok(_) => make_success(serde_json::json!({"status": "completed"}), id.clone()),
+        Err(e) => make_error(-32603, format!("Runtime error: {e}"), id.clone()),
+    }
+}
+
+#[tokio::main]
+async fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
 
@@ -225,6 +257,7 @@ fn main() {
             Err(e) => {
                 let err = make_error(-32700, format!("Parse error: {e}"), Value::Null);
                 let mut out = stdout.lock();
+                // Best-effort: MCP transport failure means the client disconnected — discard.
                 let _ = writeln!(out, "{}", serde_json::to_string(&err).unwrap());
                 let _ = out.flush();
                 continue;
@@ -236,6 +269,7 @@ fn main() {
             None => {
                 let err = make_error(-32600, "Missing method field".into(), request.get("id").cloned().unwrap_or(Value::Null));
                 let mut out = stdout.lock();
+                // Best-effort: MCP transport failure means the client disconnected — discard.
                 let _ = writeln!(out, "{}", serde_json::to_string(&err).unwrap());
                 let _ = out.flush();
                 continue;
@@ -246,13 +280,15 @@ fn main() {
         let id = request.get("id").cloned().unwrap_or(Value::Null);
 
         let response = match method.as_str() {
-            "validate_workflow" => handle_validate(&params, &id),
-            "parse_workflow" => handle_parse(&params, &id),
-            "describe_schema" => handle_describe_schema(&id),
+            "validate_workflow" => handle_validate(&params, &id).await,
+            "parse_workflow" => handle_parse(&params, &id).await,
+            "describe_schema" => handle_describe_schema(&id).await,
+            "run_workflow" => handle_run(&params, &id).await,
             _ => make_error(-32601, format!("Method not found: {method}"), id),
         };
 
         let mut out = stdout.lock();
+        // Best-effort: MCP transport failure means the client disconnected — discard.
         let _ = writeln!(out, "{}", serde_json::to_string(&response).unwrap());
         let _ = out.flush();
     }
