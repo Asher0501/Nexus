@@ -154,7 +154,7 @@
 | 入口节点 | `edges` 中没有入边的节点 |
 | 唯一 ID | 所有节点 id 不可重复 |
 | threshold | 默认 1，大于 1 需要 N 次才触发 |
-| exit_reason | 精确字符串匹配 |
+| exit_reason | 精确字符串匹配，通过 `__nexus_exit_reason:` stdout 行协议设置 |
 | 模板插值 | `{{inputs.node_id}}` 在 spawn 前替换 |
 | 退出码判断 | exit 0 = 完成，非0 = 失败。退出码失败不自动重试 |
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,9 +99,6 @@ pub struct Engine {
     event_rx: mpsc::Receiver<EngineEvent>,
     /// Optional callback for real-time node lifecycle events.
     event_cb: Option<NodeEventCb>,
-    /// Set of nodes that have been enqueued for execution.
-    /// Used to prevent duplicate NodeReady events (fan-in convergence).
-    enqueued: HashSet<NodeIndex>,
 }
 
 impl fmt::Debug for Engine {
@@ -162,7 +159,6 @@ impl Engine {
             event_tx: tx,
             event_rx: rx,
             event_cb,
-            enqueued: HashSet::new(),
         })
     }
 
@@ -179,9 +175,7 @@ impl Engine {
 
         // Seed entry nodes.
         for &entry in self.scheduler.graph().entry_nodes() {
-            if self.enqueued.insert(entry) {
-                let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: entry }).await;
-            }
+            let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: entry }).await;
         }
 
         let started_at = std::time::Instant::now();
@@ -342,7 +336,6 @@ impl Engine {
 
                 if should_retry {
                     self.data_router.clear_output(node_id);
-                    self.enqueued.remove(&node_id);
                     let _ = self.event_tx.send(EngineEvent::NodeReady { node_id }).await;
                 } else {
                     if let Ok(outcome) = &outcome {
@@ -356,7 +349,7 @@ impl Engine {
                             EventType::Failed
                         };
 
-                        let ready_nodes = self.scheduler.handle_event(
+                        self.scheduler.handle_event(
                             node_id,
                             event_type,
                             outcome.exit_reason.as_deref(),
@@ -397,18 +390,16 @@ impl Engine {
                             }
                         }
 
-                        for target in ready_nodes {
-                            if self.enqueued.insert(target) {
-                                let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: target }).await;
-                            }
+                        // scheduler.handle_event has already placed ready nodes
+                        // into the scheduler's ready_queue. Drain them here.
+                        for target in self.scheduler.dequeue_all() {
+                            let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: target }).await;
                         }
                     } else {
                         if let Some(ns) = self.scheduler.state_mut().states.get_mut(&node_id) {
                             ns.status = crate::graph::scheduler::NodeStatus::Failed;
                         }
                     }
-
-                    self.enqueued.remove(&node_id);
                 }
 
                 self.running_count -= 1;
@@ -688,6 +679,454 @@ mod tests {
             engine.scheduler().is_converged(),
             "chain graph should converge"
         );
+    }
+
+    #[tokio::test]
+    async fn test_exit_reason_filter_triggers_downstream() {
+        // Minimal test: A (exit_reason=ok via line protocol) → B (exit_reason="ok")
+        // A produces __nexus_exit_reason: ok → B should trigger and complete.
+        use crate::model::predecessor::{EventType, SchedulingEdgeDef, TriggerExpr};
+        use crate::model::provider::ProviderDef;
+
+        let def = WorkflowDef {
+            nodes: vec![
+                crate::model::workflow::NodeDef {
+                    id: "A".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo __nexus_exit_reason: ok && echo data".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "B".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo b_done".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+            ],
+            edges: vec![SchedulingEdgeDef {
+                from: "A".into(),
+                to: "B".into(),
+                trigger: TriggerExpr::All,
+                event: EventType::Complete,
+                exit_reason: Some("ok".into()),
+                threshold: 1,
+            }],
+            dataflows: vec![],
+        };
+
+        let config = EngineConfig::new(Some(1), 3600, 3);
+        let mut engine = Engine::new(def, config, None).expect("valid workflow");
+        let result = tokio::time::timeout(Duration::from_secs(30), engine.run()).await;
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => panic!("test_exit_reason_filter_triggers_downstream timed out after 30s"),
+        };
+        assert!(result.is_ok(), "workflow should converge: {:?}", result);
+
+        let a_idx = engine.scheduler().graph().node_index("A").expect("A exists");
+        let b_idx = engine.scheduler().graph().node_index("B").expect("B exists");
+        let state = engine.scheduler().state();
+        assert_eq!(
+            state.states[&a_idx].status,
+            NodeStatus::Completed,
+            "A should be Completed"
+        );
+        assert_eq!(
+            state.states[&b_idx].status,
+            NodeStatus::Completed,
+            "B should be triggered by exit_reason 'ok'"
+        );
+        assert!(
+            engine.scheduler().is_converged(),
+            "graph should converge"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exit_reason_routes_ok_to_b() {
+        // A → B (exit_reason="ok"). A produces exit_reason "ok" → B should trigger.
+        use crate::model::predecessor::{EventType, SchedulingEdgeDef, TriggerExpr};
+        use crate::model::provider::ProviderDef;
+
+        let def = WorkflowDef {
+            nodes: vec![
+                crate::model::workflow::NodeDef {
+                    id: "A".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo __nexus_exit_reason: ok && echo data".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "B".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo b_done".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+            ],
+            edges: vec![SchedulingEdgeDef {
+                from: "A".into(),
+                to: "B".into(),
+                trigger: TriggerExpr::All,
+                event: EventType::Complete,
+                exit_reason: Some("ok".into()),
+                threshold: 1,
+            }],
+            dataflows: vec![],
+        };
+
+        let config = EngineConfig::new(Some(1), 3600, 3);
+        let mut engine = Engine::new(def, config, None).expect("valid workflow");
+        let result = tokio::time::timeout(Duration::from_secs(30), engine.run()).await;
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => panic!("test_exit_reason_routes_ok_to_b timed out after 30s"),
+        };
+        assert!(result.is_ok(), "workflow should converge: {:?}", result);
+
+        let a_idx = engine.scheduler().graph().node_index("A").expect("A exists");
+        let b_idx = engine.scheduler().graph().node_index("B").expect("B exists");
+        let state = engine.scheduler().state();
+        assert_eq!(state.states[&a_idx].status, NodeStatus::Completed, "A should be Completed");
+        assert_eq!(
+            state.states[&b_idx].status,
+            NodeStatus::Completed,
+            "B should be triggered (exit_reason 'ok' matches)"
+        );
+        assert!(engine.scheduler().is_converged(), "graph should converge");
+    }
+
+    #[tokio::test]
+    async fn test_exit_reason_routes_review_to_c() {
+        // A → C (exit_reason="review"). A produces exit_reason "review" → C should trigger.
+        use crate::model::predecessor::{EventType, SchedulingEdgeDef, TriggerExpr};
+        use crate::model::provider::ProviderDef;
+
+        let def = WorkflowDef {
+            nodes: vec![
+                crate::model::workflow::NodeDef {
+                    id: "A".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo __nexus_exit_reason: review && echo data".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "C".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo c_done".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+            ],
+            edges: vec![SchedulingEdgeDef {
+                from: "A".into(),
+                to: "C".into(),
+                trigger: TriggerExpr::All,
+                event: EventType::Complete,
+                exit_reason: Some("review".into()),
+                threshold: 1,
+            }],
+            dataflows: vec![],
+        };
+
+        let config = EngineConfig::new(Some(1), 3600, 3);
+        let mut engine = Engine::new(def, config, None).expect("valid workflow");
+        let result = tokio::time::timeout(Duration::from_secs(30), engine.run()).await;
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => panic!("test_exit_reason_routes_review_to_c timed out after 30s"),
+        };
+        assert!(result.is_ok(), "workflow should converge: {:?}", result);
+
+        let a_idx = engine.scheduler().graph().node_index("A").expect("A exists");
+        let c_idx = engine.scheduler().graph().node_index("C").expect("C exists");
+        let state = engine.scheduler().state();
+        assert_eq!(state.states[&a_idx].status, NodeStatus::Completed, "A should be Completed");
+        assert_eq!(
+            state.states[&c_idx].status,
+            NodeStatus::Completed,
+            "C should be triggered (exit_reason 'review' matches)"
+        );
+        assert!(engine.scheduler().is_converged(), "graph should converge");
+    }
+
+    #[tokio::test]
+    async fn test_exit_reason_branch_routing_in_engine() {
+        // Full branch: A → B (exit_reason="ok"), A → C (exit_reason="review").
+        // A produces exit_reason "ok" → B runs. C stays Pending since its exit_reason
+        // doesn't match — graph does NOT converge. We query partial state after a short
+        // timeout to verify B completed and C remained Pending.
+        use crate::model::predecessor::{EventType, SchedulingEdgeDef, TriggerExpr};
+        use crate::model::provider::ProviderDef;
+
+        let def = WorkflowDef {
+            nodes: vec![
+                crate::model::workflow::NodeDef {
+                    id: "A".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo __nexus_exit_reason: ok && echo data".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "B".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo b_route".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "C".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo c_route".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+            ],
+            edges: vec![
+                SchedulingEdgeDef {
+                    from: "A".into(),
+                    to: "B".into(),
+                    trigger: TriggerExpr::Any,
+                    event: EventType::Complete,
+                    exit_reason: Some("ok".into()),
+                    threshold: 1,
+                },
+                SchedulingEdgeDef {
+                    from: "A".into(),
+                    to: "C".into(),
+                    trigger: TriggerExpr::Any,
+                    event: EventType::Complete,
+                    exit_reason: Some("review".into()),
+                    threshold: 1,
+                },
+            ],
+            dataflows: vec![],
+        };
+
+        let config = EngineConfig::new(Some(1), 3600, 3);
+        let mut engine = Engine::new(def, config, None).expect("valid workflow");
+
+        // Let A→B run (should take < 1s). C stays Pending → graph won't converge.
+        // The 5s timeout elapses, proving the engine is stuck waiting.
+        let result = tokio::time::timeout(Duration::from_secs(5), engine.run()).await;
+        assert!(
+            result.is_err(),
+            "graph should NOT converge when C stays Pending (exit_reason 'ok' != 'review')"
+        );
+
+        // Check partial state: B completed, C stayed Pending.
+        let state = engine.scheduler().state();
+        let b_idx = engine.scheduler().graph().node_index("B").expect("B exists");
+        let c_idx = engine.scheduler().graph().node_index("C").expect("C exists");
+
+        assert_eq!(
+            state.states[&b_idx].status,
+            NodeStatus::Completed,
+            "B should be triggered (exit_reason 'ok' matches)"
+        );
+        assert_eq!(
+            state.states[&c_idx].status,
+            NodeStatus::Pending,
+            "C should NOT be triggered (exit_reason 'ok' doesn't match 'review')"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fan_in_all_one_fails_no_trigger() {
+        // A → C (All, Complete), B → C (All, Complete)
+        // A fails (exit 1, Failed event) → A's edge expects Complete, so it
+        // does NOT fire. B completes (Complete event) → B's edge fires,
+        // decrementing fan_in_pending[C] from 2 to 1. Since pending > 0,
+        // C is NOT enqueued. C stays Pending forever → engine does not converge.
+        //
+        // The engine event loop hangs (no new events → waiting on event_rx).
+        // The test timeout catches this: engine.run() should NOT complete
+        // within the timeout.
+        use crate::model::predecessor::{EventType, SchedulingEdgeDef, TriggerExpr};
+        use crate::model::provider::ProviderDef;
+
+        let def = WorkflowDef {
+            nodes: vec![
+                crate::model::workflow::NodeDef {
+                    id: "A".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c exit 1".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "B".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo ok".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "C".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo done".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+            ],
+            edges: vec![
+                SchedulingEdgeDef {
+                    from: "A".into(),
+                    to: "C".into(),
+                    trigger: TriggerExpr::All,
+                    event: EventType::Complete,
+                    exit_reason: None,
+                    threshold: 1,
+                },
+                SchedulingEdgeDef {
+                    from: "B".into(),
+                    to: "C".into(),
+                    trigger: TriggerExpr::All,
+                    event: EventType::Complete,
+                    exit_reason: None,
+                    threshold: 1,
+                },
+            ],
+            dataflows: vec![],
+        };
+        let config = EngineConfig::new(Some(2), 3600, 3);
+        let mut engine = Engine::new(def, config, None).expect("valid workflow");
+
+        // With correct All semantics, engine.run() should NOT converge
+        // (C remains Pending because A's edge never fires). The 5s timeout
+        // should elapse, proving the engine is stuck waiting.
+        let result = tokio::time::timeout(Duration::from_secs(5), engine.run()).await;
+
+        assert!(
+            result.is_err(),
+            "engine should NOT converge when A fails and C requires both A and B (All semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fan_in_all_both_complete_triggers_downstream() {
+        // A → C (All, Complete), B → C (All, Complete)
+        // Both A and B complete (exit 0) → both edges fire → fan_in_pending[C]
+        // drops to 0 → C is enqueued → C executes → graph converges.
+        use crate::model::predecessor::{EventType, SchedulingEdgeDef, TriggerExpr};
+        use crate::model::provider::ProviderDef;
+
+        let def = WorkflowDef {
+            nodes: vec![
+                crate::model::workflow::NodeDef {
+                    id: "A".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo a_ok".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "B".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo b_ok".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "C".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo c_done".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+            ],
+            edges: vec![
+                SchedulingEdgeDef {
+                    from: "A".into(),
+                    to: "C".into(),
+                    trigger: TriggerExpr::All,
+                    event: EventType::Complete,
+                    exit_reason: None,
+                    threshold: 1,
+                },
+                SchedulingEdgeDef {
+                    from: "B".into(),
+                    to: "C".into(),
+                    trigger: TriggerExpr::All,
+                    event: EventType::Complete,
+                    exit_reason: None,
+                    threshold: 1,
+                },
+            ],
+            dataflows: vec![],
+        };
+        let config = EngineConfig::new(Some(2), 3600, 3);
+        let mut engine = Engine::new(def, config, None).expect("valid workflow");
+        let result = tokio::time::timeout(Duration::from_secs(30), engine.run()).await;
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => panic!("test_fan_in_all_both_complete_triggers_downstream timed out after 30s"),
+        };
+        assert!(result.is_ok(), "both complete → workflow converges");
+
+        let state = engine.scheduler().state();
+        let a_idx = engine.scheduler().graph().node_index("A").expect("A exists");
+        let b_idx = engine.scheduler().graph().node_index("B").expect("B exists");
+        let c_idx = engine.scheduler().graph().node_index("C").expect("C exists");
+
+        assert_eq!(state.states[&a_idx].status, NodeStatus::Completed, "A completed");
+        assert_eq!(state.states[&b_idx].status, NodeStatus::Completed, "B completed");
+        assert_eq!(
+            state.states[&c_idx].status,
+            NodeStatus::Completed,
+            "C should execute when both A and B complete (All semantics)"
+        );
+        assert!(engine.scheduler().is_converged(), "graph should converge");
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use std::collections::{HashMap, VecDeque};
 
 use petgraph::graph::NodeIndex;
 
-use crate::graph::edge::{EdgeDef, EdgeState};
+use crate::graph::edge::{EdgeDef, EdgeState, Strategy};
 use crate::graph::graph_def::{GraphDef, NodeTransfer};
 use crate::model::predecessor::EventType;
 
@@ -96,6 +96,9 @@ pub struct RuntimeState {
     pub(crate) edge_states: Vec<EdgeState>,
     /// Queue of nodes ready to execute.
     pub(crate) ready_queue: VecDeque<NodeIndex>,
+    /// Tracks how many All-strategy incoming edges have not yet fired for each
+    /// downstream node. When this reaches 0, the node is ready to enqueue.
+    pub(crate) fan_in_pending: HashMap<NodeIndex, usize>,
 }
 
 /// The graph scheduler that drives node execution via event handling.
@@ -137,6 +140,16 @@ impl Scheduler {
             .map(|_| EdgeState::default())
             .collect();
 
+        // Build fan_in_pending: for each node, count how many incoming All-strategy
+        // edges point to it. A node becomes ready (enqueued) only when all its
+        // All-strategy incoming edges have fired (pending drops to 0).
+        let mut fan_in_pending: HashMap<NodeIndex, usize> = HashMap::new();
+        for edge in graph.edges() {
+            if edge.strategy == Strategy::All {
+                *fan_in_pending.entry(edge.to).or_insert(0) += 1;
+            }
+        }
+
         Self {
             graph,
             state: RuntimeState {
@@ -145,6 +158,7 @@ impl Scheduler {
                 retry_counts,
                 edge_states,
                 ready_queue: VecDeque::new(),
+                fan_in_pending,
             },
         }
     }
@@ -162,12 +176,13 @@ impl Scheduler {
     /// 1. Skip if the edge has already triggered
     /// 2. Skip if the edge's event type does not match the incoming event
     /// 3. Skip if the edge has an exit_reason filter that does not match
-    /// 4. For `Strategy::All`: skip the edge if the sending `node` is not
-    ///    the edge's `from` node (edge no longer tracks multi-source via
-    ///    received set — convergence is handled by the engine)
-    /// 5. Increment the edge's event counter
-    /// 6. If the counter meets or exceeds the threshold and the edge hasn't
-    ///    fired: mark as triggered and enqueue the target node
+    /// 4. Increment the edge's event counter
+    /// 5. If the counter meets or exceeds the threshold and the edge hasn't
+    ///    fired: mark as triggered and apply the strategy:
+    ///    - `Strategy::Any`: immediately enqueue the target node
+    ///    - `Strategy::All`: decrement `fan_in_pending[target]`; enqueue only
+    ///      when `fan_in_pending[target]` reaches 0 (all incoming All-edges
+    ///      have fired)
     ///
     /// # Returns
     ///
@@ -249,7 +264,32 @@ impl Scheduler {
             // 5. Check threshold and trigger.
             if es.event_count >= edge.threshold {
                 es.triggered = true;
-                ready.push(edge.to);
+
+                match edge.strategy {
+                    Strategy::Any => {
+                        // Any: immediately enqueue the downstream node.
+                        self.state.ready_queue.push_back(edge.to);
+                        ready.push(edge.to);
+                    }
+                    Strategy::All => {
+                        // All: decrement the fan_in_pending counter for the target.
+                        if let Some(pending) = self.state.fan_in_pending.get_mut(&edge.to) {
+                            if *pending > 0 {
+                                *pending -= 1;
+                            }
+                        }
+                        // Only enqueue when ALL All-strategy incoming edges have fired.
+                        let all_ready = self.state.fan_in_pending
+                            .get(&edge.to)
+                            .map(|&p| p == 0)
+                            .unwrap_or(true);
+                        if all_ready {
+                            self.state.ready_queue.push_back(edge.to);
+                            ready.push(edge.to);
+                        }
+                        // pending > 0 → still waiting for other incoming edges.
+                    }
+                }
             }
         }
 
@@ -262,6 +302,22 @@ impl Scheduler {
     #[must_use]
     pub fn dequeue(&mut self) -> Option<NodeIndex> {
         self.state.ready_queue.pop_front()
+    }
+
+    /// Drain all currently ready nodes from the queue.
+    ///
+    /// Used by [`Engine`] to collect all nodes that became ready after a single
+    /// event was processed, since [`handle_event`] now pushes directly to the
+    /// scheduler's ready queue instead of returning them in a `Vec`.
+    #[must_use]
+    pub fn dequeue_all(&mut self) -> Vec<NodeIndex> {
+        self.state.ready_queue.drain(..).collect()
+    }
+
+    /// Returns `true` if the ready queue is non-empty.
+    #[must_use]
+    pub fn has_ready(&self) -> bool {
+        !self.state.ready_queue.is_empty()
     }
 
     /// Enqueue a node for execution.
@@ -311,11 +367,18 @@ impl Scheduler {
                     es.triggered = false;
                     es.event_count = 0;
                 }
+                // Restore fan_in_pending for All-strategy edges — the downstream
+                // node is now waiting for this edge to fire again.
+                if let Some(edge) = self.graph.edges().get(edge_idx) {
+                    if edge.strategy == Strategy::All {
+                        if let Some(pending) = self.state.fan_in_pending.get_mut(&edge.to) {
+                            *pending += 1;
+                        }
+                    }
+                }
             }
         }
 
-        // Enqueue for re-execution.
-        self.enqueue(node);
         true
     }
 
@@ -719,21 +782,25 @@ mod tests {
         assert_eq!(ready2[0], c, "B's edge should also target C");
     }
 
-    // ── 4. Fan-in: each from-node has its own edge ────────
+    // ── 4. Fan-in All: both must complete ──────────────────
 
     #[test]
     fn test_fan_in_triggers_separate_edges() {
+        // build_fan_in_graph uses Strategy::All for both edges, so C should
+        // only be ready after BOTH A and B complete.
         let mut scheduler = Scheduler::new(build_fan_in_graph());
         let a_idx = scheduler.graph().node_index("A").expect("A should exist");
-
-        // A completes → edge 0 (A→C) fires immediately.
-        let ready = scheduler.handle_event(a_idx, EventType::Complete, None);
-        assert_eq!(ready.len(), 1, "A triggers its own edge to C");
-
         let b_idx = scheduler.graph().node_index("B").expect("B should exist");
-        // B completes → edge 1 (B→C) fires separately.
+        let c_idx = scheduler.graph().node_index("C").expect("C should exist");
+
+        // A completes → edge 0 fires but C is NOT ready (B hasn't completed).
+        let ready = scheduler.handle_event(a_idx, EventType::Complete, None);
+        assert!(ready.is_empty(), "A alone should not trigger C with All strategy");
+
+        // B completes → now both edges have fired, C should be ready.
         let ready = scheduler.handle_event(b_idx, EventType::Complete, None);
-        assert_eq!(ready.len(), 1, "B triggers its own edge to C");
+        assert_eq!(ready.len(), 1, "Both A and B complete → C ready");
+        assert_eq!(ready[0], c_idx, "C should be the ready node");
     }
 
     // ── 5. Threshold > 1 ──────────────────────────────────
@@ -895,6 +962,128 @@ mod tests {
         assert_eq!(ready[0], b);
     }
 
+    // ── 6b. Exit reason branch routing ─────────────────────
+
+    fn build_exit_reason_branch_graph() -> GraphDef {
+        // A → B (Complete, exit_reason="ok"), A → C (Complete, exit_reason="review")
+        let mut graph = StableDiGraph::new();
+        let a = graph.add_node(NodeData {
+            id: "A".into(),
+            providers: vec![],
+            process_timeout_secs: 10,
+            max_concurrency: 1,
+        });
+        let b = graph.add_node(NodeData {
+            id: "B".into(),
+            providers: vec![],
+            process_timeout_secs: 10,
+            max_concurrency: 1,
+        });
+        let c = graph.add_node(NodeData {
+            id: "C".into(),
+            providers: vec![],
+            process_timeout_secs: 10,
+            max_concurrency: 1,
+        });
+
+        let mut index = HashMap::new();
+        index.insert("A".into(), a);
+        index.insert("B".into(), b);
+        index.insert("C".into(), c);
+
+        let edges = vec![
+            EdgeDef {
+                from: a,
+                to: b,
+                event_type: EventType::Complete,
+                exit_reason: Some("ok".into()),
+                threshold: 1,
+                strategy: Strategy::Any,
+            },
+            EdgeDef {
+                from: a,
+                to: c,
+                event_type: EventType::Complete,
+                exit_reason: Some("review".into()),
+                threshold: 1,
+                strategy: Strategy::Any,
+            },
+        ];
+
+        let mut transfers = HashMap::new();
+        transfers.insert(
+            a,
+            NodeTransfer {
+                from: a,
+                out_edge_indices: vec![0, 1],
+            },
+        );
+        transfers.insert(
+            b,
+            NodeTransfer {
+                from: b,
+                out_edge_indices: vec![],
+            },
+        );
+        transfers.insert(
+            c,
+            NodeTransfer {
+                from: c,
+                out_edge_indices: vec![],
+            },
+        );
+
+        let params = HashMap::from([
+            (a, NodeParams {
+                process_timeout_secs: 10,
+            }),
+            (b, NodeParams {
+                process_timeout_secs: 10,
+            }),
+            (c, NodeParams {
+                process_timeout_secs: 10,
+            }),
+        ]);
+        let entries = vec![a];
+
+        GraphDef::from_components(graph, index, edges, transfers, params, entries)
+            .expect("graph should be valid")
+    }
+
+    #[test]
+    fn test_exit_reason_branch_to_b() {
+        // exit_reason "ok" should route to B, not C
+        let mut scheduler = Scheduler::new(build_exit_reason_branch_graph());
+        let a = scheduler.graph().node_index("A").expect("A exists");
+        let b = scheduler.graph().node_index("B").expect("B exists");
+
+        let ready = scheduler.handle_event(a, EventType::Complete, Some("ok"));
+        assert_eq!(ready.len(), 1, "exit_reason 'ok' should trigger exactly one downstream");
+        assert_eq!(ready[0], b, "'ok' should route to B");
+    }
+
+    #[test]
+    fn test_exit_reason_branch_to_c() {
+        // exit_reason "review" should route to C, not B
+        let mut scheduler = Scheduler::new(build_exit_reason_branch_graph());
+        let a = scheduler.graph().node_index("A").expect("A exists");
+        let c = scheduler.graph().node_index("C").expect("C exists");
+
+        let ready = scheduler.handle_event(a, EventType::Complete, Some("review"));
+        assert_eq!(ready.len(), 1, "exit_reason 'review' should trigger exactly one downstream");
+        assert_eq!(ready[0], c, "'review' should route to C");
+    }
+
+    #[test]
+    fn test_exit_reason_branch_no_match() {
+        // exit_reason "unknown" should match neither edge → no downstream triggered
+        let mut scheduler = Scheduler::new(build_exit_reason_branch_graph());
+        let a = scheduler.graph().node_index("A").expect("A exists");
+
+        let ready = scheduler.handle_event(a, EventType::Complete, Some("unknown"));
+        assert!(ready.is_empty(), "no edge matches exit_reason 'unknown'");
+    }
+
     // ── 7. Retry node ─────────────────────────────────────
 
     #[test]
@@ -987,13 +1176,13 @@ mod tests {
         let a = scheduler.graph().node_index("A").expect("A should exist");
         let b = scheduler.graph().node_index("B").expect("B should exist");
 
-        // First: A completes → edge 0 (A→C) fires.
+        // A completes → edge 0 fires but C not ready (All, pending still 1).
         let r1 = scheduler.handle_event(a, EventType::Complete, None);
-        assert_eq!(r1.len(), 1);
+        assert!(r1.is_empty(), "A alone should not trigger C with All strategy");
 
-        // B completes → edge 1 (B→C) fires.
+        // B completes → edge 1 fires, C is now ready (pending 0).
         let r2 = scheduler.handle_event(b, EventType::Complete, None);
-        assert_eq!(r2.len(), 1);
+        assert_eq!(r2.len(), 1, "B completes → C ready");
 
         // B completes again → edge 1 already triggered.
         let r3 = scheduler.handle_event(b, EventType::Complete, None);
@@ -1145,7 +1334,52 @@ mod tests {
         scheduler.enqueue_entries(); // no-op, no crash
     }
 
-    // ── 15. Fan-out: one event triggers multiple edges ────
+    // ── 15. Fan-in All: waits for all upstreams ───────────
+
+    #[test]
+    fn test_fan_in_all_waits_for_all_upstreams() {
+        // A → C (All, Complete), B → C (All, Complete)
+        // True All: C should NOT be ready until both A and B have completed.
+        let mut scheduler = Scheduler::new(build_fan_in_graph());
+        let a = scheduler.graph().node_index("A").expect("A exists");
+        let b = scheduler.graph().node_index("B").expect("B exists");
+        let c = scheduler.graph().node_index("C").expect("C exists");
+
+        // A completes — C should NOT be ready yet (B hasn't completed).
+        let ready = scheduler.handle_event(a, EventType::Complete, None);
+        assert!(ready.is_empty(), "All: A alone should NOT trigger C");
+        assert!(!scheduler.has_ready(), "no nodes should be ready");
+
+        // B also completes — now C should be ready.
+        let ready = scheduler.handle_event(b, EventType::Complete, None);
+        assert_eq!(ready.len(), 1, "All: both A and B complete → C ready");
+        assert_eq!(ready[0], c, "C should be the ready node");
+
+        // Verify fan_in_pending is now 0 for C.
+        let pending = scheduler.state.fan_in_pending.get(&c).copied().unwrap_or(0);
+        assert_eq!(pending, 0, "fan_in_pending for C should be 0 after both fire");
+    }
+
+    #[test]
+    fn test_fan_in_all_only_triggers_once() {
+        // Same graph: A → C (All), B → C (All). After both fire, C is ready.
+        // Further events on A or B should not re-enqueue C.
+        let mut scheduler = Scheduler::new(build_fan_in_graph());
+        let a = scheduler.graph().node_index("A").expect("A exists");
+        let b = scheduler.graph().node_index("B").expect("B exists");
+
+        // Both complete → C ready.
+        scheduler.handle_event(a, EventType::Complete, None);
+        scheduler.handle_event(b, EventType::Complete, None);
+        assert_eq!(scheduler.dequeue_all().len(), 1, "C should be ready once");
+
+        // More events on A/B — edges already triggered, no-op.
+        scheduler.handle_event(a, EventType::Complete, None);
+        scheduler.handle_event(b, EventType::Complete, None);
+        assert!(!scheduler.has_ready(), "no more ready nodes after all edges spent");
+    }
+
+    // ── 16. Fan-out: one event triggers multiple edges ────
 
     #[test]
     fn test_fan_out_triggers_multiple_edges() {

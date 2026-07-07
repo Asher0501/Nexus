@@ -239,7 +239,7 @@ async fn stream_and_wait(
             Ok(Err(_)) => { let _ = exit_tx.send((-1, false)); }
             Err(_elapsed) => {
                 if let Err(e) = child.kill().await {
-                    tracing::warn!(target: "nexus::node", "failed to kill timed-out child: {e}");
+                    tracing::warn!(target: "nexus::node", "[NodeShell] failed to kill timed-out child: {e}");
                 }
                 // Oneshot send failure: receiver dropped (stream_and_wait already exited) — safe to ignore.
                 let _ = exit_tx.send((-1, true));

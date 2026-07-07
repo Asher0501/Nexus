@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use petgraph::graph::NodeIndex;
+use tracing;
 
 /// Routes output data from upstream nodes to downstream consumers.
 ///
@@ -20,6 +21,8 @@ pub struct DataRouter {
     outputs: HashMap<NodeIndex, String>,
     /// Pre-built index: target node → [(alias, source_node_index)]
     flow_index: HashMap<NodeIndex, Vec<(String, NodeIndex)>>,
+    /// Reverse mapping: NodeIndex → string node ID (for diagnostics).
+    index_to_id: HashMap<NodeIndex, String>,
 }
 
 impl DataRouter {
@@ -33,6 +36,11 @@ impl DataRouter {
         node_id_to_index: HashMap<String, NodeIndex>,
         dataflows: &[crate::model::predecessor::DataFlowDef],
     ) -> Self {
+        let index_to_id: HashMap<NodeIndex, String> = node_id_to_index
+            .iter()
+            .map(|(id, idx)| (*idx, id.clone()))
+            .collect();
+
         let mut flow_index: HashMap<NodeIndex, Vec<(String, NodeIndex)>> = HashMap::new();
         for df in dataflows {
             if let (Some(&from), Some(&to)) =
@@ -45,6 +53,7 @@ impl DataRouter {
         Self {
             outputs: HashMap::new(),
             flow_index,
+            index_to_id,
         }
     }
 
@@ -72,8 +81,24 @@ impl DataRouter {
         let mut result = HashMap::new();
         if let Some(flows) = self.flow_index.get(&target) {
             for (alias, source) in flows {
-                let output = self.outputs.get(source).cloned().unwrap_or_default();
-                result.insert(alias.clone(), output);
+                match self.outputs.get(source) {
+                    Some(output) if !output.is_empty() => {
+                        result.insert(alias.clone(), output.clone());
+                    }
+                    _ => {
+                        let source_id = self
+                            .index_to_id
+                            .get(source)
+                            .map(|s| s.as_str())
+                            .unwrap_or("unknown");
+                        tracing::info!(
+                            target: "nexus::diagnostic",
+                            "[Engine.DataRouter] Task node:{} no msg.",
+                            source_id,
+                        );
+                        result.insert(alias.clone(), String::new());
+                    }
+                }
             }
         }
         result
