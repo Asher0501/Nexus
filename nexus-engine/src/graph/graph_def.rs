@@ -11,7 +11,7 @@ use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableDiGraph;
 
 use crate::graph::edge::EdgeDef;
-use crate::model::error::BuildError;
+use crate::model::error::ValidationError;
 use crate::model::provider::ProviderDef;
 
 /// Data associated with each node in the graph.
@@ -71,11 +71,11 @@ impl GraphDef {
     /// Construct a `GraphDef` from pre-built components.
     ///
     /// This is the ONLY way to create a `GraphDef`. All invariants are checked
-    /// before returning. Returns [`BuildError`] if invariants fail.
+    /// before returning. Returns [`ValidationError`] if invariants fail.
     ///
     /// # Errors
     ///
-    /// Returns `BuildError::InvalidNodeIndex` when any invariant check fails.
+    /// Returns `ValidationError::BuildInvariant` when any invariant check fails.
     pub fn from_components(
         graph: StableDiGraph<NodeData, ()>,
         index: HashMap<String, NodeIndex>,
@@ -83,7 +83,7 @@ impl GraphDef {
         transfers: HashMap<NodeIndex, NodeTransfer>,
         params: HashMap<NodeIndex, NodeParams>,
         entries: Vec<NodeIndex>,
-    ) -> Result<Self, BuildError> {
+    ) -> Result<Self, ValidationError> {
         let def = Self {
             graph,
             index,
@@ -93,7 +93,7 @@ impl GraphDef {
             entries,
         };
         if let Err(detail) = def.check_invariants() {
-            return Err(BuildError::InvalidNodeIndex {
+            return Err(ValidationError::BuildInvariant {
                 description: detail.into(),
             });
         }
@@ -103,7 +103,7 @@ impl GraphDef {
     /// Verify all five invariants hold.
     ///
     /// 1. All entries have valid [`NodeIndex`] values in the graph
-    /// 2. All edges' `from_nodes` / `to` reference valid [`NodeIndex`] values
+    /// 2. All edges' `from` / `to` reference valid [`NodeIndex`] values
     /// 3. `params` covers every node (same count as node count)
     /// 4. `transfers` covers every node
     /// 5. Every edge is referenced by at least one transfer
@@ -130,10 +130,8 @@ impl GraphDef {
 
         // 2. All edge indices are valid
         for edge in &self.edges {
-            for &from in &edge.from_nodes {
-                if from.index() >= n {
-                    return Err("invariant 2: edge from_nodes index out of bounds");
-                }
+            if edge.from.index() >= n {
+                return Err("invariant 2: edge from index out of bounds");
             }
             if edge.to.index() >= n {
                 return Err("invariant 2: edge to index out of bounds");
@@ -271,7 +269,7 @@ mod tests {
         index.insert("B".into(), b);
 
         let edges = vec![EdgeDef {
-            from_nodes: vec![a],
+            from: a,
             to: b,
             event_type: EventType::Complete,
             exit_reason: None,
@@ -433,7 +431,7 @@ mod tests {
         // Create an edge that is NOT referenced by any transfer
         // (the existing valid transfer references edge index 0; add edge index 1)
         let orphan_edge = EdgeDef {
-            from_nodes: vec![NodeIndex::new(0)],
+            from: NodeIndex::new(0),
             to: NodeIndex::new(1),
             event_type: EventType::Failed,
             exit_reason: None,
@@ -442,7 +440,7 @@ mod tests {
         };
         let edges = vec![
             EdgeDef {
-                from_nodes: vec![NodeIndex::new(0)],
+                from: NodeIndex::new(0),
                 to: NodeIndex::new(1),
                 event_type: EventType::Complete,
                 exit_reason: None,

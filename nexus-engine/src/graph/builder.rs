@@ -16,7 +16,7 @@ use petgraph::stable_graph::StableDiGraph;
 use crate::graph::edge::{EdgeDef, Strategy};
 use crate::graph::graph_def::{GraphDef, NodeData, NodeParams, NodeTransfer};
 use crate::model::error::ValidationError;
-use crate::model::predecessor::{EventType, TriggerExpr};
+use crate::model::predecessor::TriggerExpr;
 use crate::model::workflow::WorkflowDef;
 
 /// Converts a validated [`WorkflowDef`] into a [`GraphDef`].
@@ -51,10 +51,7 @@ impl Builder {
         let params = Self::build_params(def, &index)?;
 
         GraphDef::from_components(graph, index, edges, transfers, params, entries)
-            .map_err(|e| vec![ValidationError::InvalidPredecessor {
-                node_id: String::new(),
-                predecessor_id: e.to_string(),
-            }])
+            .map_err(|e| vec![e])
     }
 
     /// Create all nodes in the stable digraph and build the ID-to-index map.
@@ -99,12 +96,9 @@ impl Builder {
 
     /// Build edges from the workflow definition's scheduling edges.
     ///
-    /// Groups [`SchedulingEdgeDef`] entries by their `(to, trigger, event,
-    /// exit_reason, threshold)` tuple, merging `from_nodes` for entries that
-    /// share the same grouping key. This produces one [`EdgeDef`] per unique
-    /// combination.
-    ///
-    /// Also detects entry nodes — nodes that have no incoming edges.
+    /// Produces one [`EdgeDef`] for each [`SchedulingEdgeDef`], since each
+    /// edge now has a single `from` node. Also detects entry nodes — nodes
+    /// that have no incoming edges.
     ///
     /// # Errors
     ///
@@ -114,11 +108,7 @@ impl Builder {
         def: &WorkflowDef,
         index: &HashMap<String, NodeIndex>,
     ) -> Result<(Vec<EdgeDef>, Vec<NodeIndex>), Vec<ValidationError>> {
-        // Key: (to_node_id, trigger, event, exit_reason, threshold)
-        // Value: set of from_node NodeIndices
-        type EdgeKey = (String, TriggerExpr, EventType, Option<String>, u64);
-
-        let mut edge_groups: HashMap<EdgeKey, HashSet<NodeIndex>> = HashMap::new();
+        let mut edges: Vec<EdgeDef> = Vec::new();
         let mut has_incoming_edge: HashSet<String> = HashSet::new();
 
         for edge_def in &def.edges {
@@ -140,39 +130,18 @@ impl Builder {
 
             has_incoming_edge.insert(edge_def.to.clone());
 
-            let key: EdgeKey = (
-                edge_def.to.clone(),
-                edge_def.trigger.clone(),
-                edge_def.event.clone(),
-                edge_def.exit_reason.clone(),
-                edge_def.threshold,
-            );
-            edge_groups.entry(key).or_default().insert(from_idx);
-
-            // Track the 'to' node as well for unreferenced check — we also consider
-            // that the 'from' node appears in the scheduling graph.
-            has_incoming_edge.insert(edge_def.to.clone());
+            edges.push(EdgeDef {
+                from: from_idx,
+                to: index[&edge_def.to],
+                event_type: edge_def.event.clone(),
+                exit_reason: edge_def.exit_reason.clone(),
+                threshold: edge_def.threshold,
+                strategy: match edge_def.trigger {
+                    TriggerExpr::All => Strategy::All,
+                    TriggerExpr::Any => Strategy::Any,
+                },
+            });
         }
-
-        // Build edges from groups.
-        let edges: Vec<EdgeDef> = edge_groups
-            .into_iter()
-            .map(|((to_id, trigger, event, exit_reason, threshold), from_set)| {
-                let mut from_nodes: Vec<NodeIndex> = from_set.into_iter().collect();
-                from_nodes.sort_by_key(|ni| ni.index());
-                EdgeDef {
-                    from_nodes,
-                    to: index[&to_id],
-                    event_type: event,
-                    exit_reason,
-                    threshold,
-                    strategy: match trigger {
-                        TriggerExpr::All => Strategy::All,
-                        TriggerExpr::Any => Strategy::Any,
-                    },
-                }
-            })
-            .collect();
 
         // Detect entry nodes: nodes that have no incoming edges.
         let entries: Vec<NodeIndex> = def
@@ -188,7 +157,7 @@ impl Builder {
     /// Build transfer functions (`f_v`) that aggregate outgoing edges per node.
     ///
     /// Each node gets a [`NodeTransfer`] listing the edge indices where it
-    /// appears as a `from_node`.
+    /// appears as a `from` node.
     fn build_transfers(
         edges: &[EdgeDef],
         graph: &StableDiGraph<NodeData, ()>,
@@ -206,10 +175,8 @@ impl Builder {
         }
 
         for (edge_idx, edge) in edges.iter().enumerate() {
-            for &from_node in &edge.from_nodes {
-                if let Some(transfer) = transfers.get_mut(&from_node) {
-                    transfer.out_edge_indices.push(edge_idx);
-                }
+            if let Some(transfer) = transfers.get_mut(&edge.from) {
+                transfer.out_edge_indices.push(edge_idx);
             }
         }
 
@@ -305,9 +272,8 @@ mod tests {
         };
         let graph = Builder::build(&def).expect("fan-out/fan-in should build");
         assert_eq!(graph.node_count(), 4);
-        // B→D and C→D share the same EdgeKey (D, All, Complete, None, 1),
-        // so they merge into one edge with two from_nodes. Total: 3 edges.
-        assert_eq!(graph.edge_count(), 3);
+        // Each SchedulingEdgeDef produces its own EdgeDef. Total: 4 edges.
+        assert_eq!(graph.edge_count(), 4);
         assert_eq!(graph.entry_nodes().len(), 1);
         assert_eq!(
             graph.entry_nodes()[0],
@@ -492,10 +458,10 @@ mod tests {
             dataflows: vec![],
         };
         let graph = Builder::build(&def).expect("should build");
-        // Two predecessors with same key should merge into one edge with 2 from_nodes.
-        assert_eq!(graph.edge_count(), 1);
-        let edge = &graph.edges()[0];
-        assert_eq!(edge.from_nodes.len(), 2);
-        assert_eq!(edge.threshold, 2);
+        // Two predecessors with same key each produce their own edge.
+        assert_eq!(graph.edge_count(), 2);
+        let edges = graph.edges();
+        assert_eq!(edges[0].threshold, 2);
+        assert_eq!(edges[1].threshold, 2);
     }
 }

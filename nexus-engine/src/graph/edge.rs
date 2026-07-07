@@ -4,8 +4,6 @@
 //! (runtime mutable state tracked by the scheduler), and [`Strategy`] (trigger
 //! combination logic).
 
-use std::collections::HashSet;
-
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
 
@@ -14,13 +12,17 @@ use crate::model::predecessor::EventType;
 /// Trigger strategy for an edge.
 ///
 /// Determines when an edge should be evaluated:
-/// - `All`: All `from_nodes` must signal before the event is counted.
-/// - `Any`: Any single `from_node` signal suffices.
+/// - `All`: All from-nodes must signal before the event is counted.
+/// - `Any`: Any single from-node signal suffices.
+///
+/// With single-`from` edges, `All` applies to the edge's `threshold` counter
+/// (multiple events from the same source), while fan-in convergence is handled
+/// by the engine via `StagingArea`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Strategy {
-    /// All `from_nodes` must participate before counting.
+    /// All from-nodes must participate before counting.
     All,
-    /// Any single `from_node` signal is sufficient.
+    /// Any single from-node signal is sufficient.
     Any,
 }
 
@@ -31,8 +33,8 @@ pub enum Strategy {
 /// the target node (`to`) is enqueued for execution.
 #[derive(Debug, Clone)]
 pub struct EdgeDef {
-    /// Source node indices whose events drive this edge.
-    pub from_nodes: Vec<NodeIndex>,
+    /// Source node index whose events drive this edge (single source).
+    pub from: NodeIndex,
     /// Target node index (the node triggered by this edge).
     pub to: NodeIndex,
     /// Event type that this edge responds to.
@@ -42,22 +44,21 @@ pub struct EdgeDef {
     pub exit_reason: Option<String>,
     /// Number of matching events required before the edge fires.
     pub threshold: u64,
-    /// How `from_nodes` events are combined.
+    /// How events are combined.
     pub strategy: Strategy,
 }
 
 /// Edge runtime state — mutated by the scheduler during graph execution.
 ///
-/// Tracks whether this edge has already fired, how many matching events have
-/// been received, and which `from_nodes` have signalled (for `Strategy::All`).
+/// Tracks whether this edge has already fired and how many matching events
+/// have been received. With single-`from` edges, multi-source convergence is
+/// handled at the engine level (multiple edges sharing the same `to`).
 #[derive(Debug, Clone, Default)]
 pub struct EdgeState {
     /// Whether this edge has already fired.
     pub triggered: bool,
     /// Number of matching events received so far.
     pub event_count: u64,
-    /// Set of `from_nodes` that have signalled (used by `Strategy::All`).
-    pub received: HashSet<NodeIndex>,
 }
 
 #[cfg(test)]
@@ -71,10 +72,6 @@ mod tests {
         let state = EdgeState::default();
         assert!(!state.triggered, "default triggered must be false");
         assert_eq!(state.event_count, 0, "default event_count must be 0");
-        assert!(
-            state.received.is_empty(),
-            "default received set must be empty"
-        );
     }
 
     /// Verify that `Strategy` can be serialized and deserialized via serde.
@@ -103,14 +100,9 @@ mod tests {
 
         state.triggered = true;
         state.event_count = 5;
-        state.received.insert(NodeIndex::new(0));
-        state.received.insert(NodeIndex::new(1));
 
         assert!(state.triggered);
         assert_eq!(state.event_count, 5);
-        assert_eq!(state.received.len(), 2);
-        assert!(state.received.contains(&NodeIndex::new(0)));
-        assert!(state.received.contains(&NodeIndex::new(1)));
     }
 
     /// Verify that `EdgeDef` can be constructed with both `Strategy` variants.
@@ -120,7 +112,7 @@ mod tests {
         let b = NodeIndex::new(1);
 
         let edge_all = EdgeDef {
-            from_nodes: vec![a],
+            from: a,
             to: b,
             event_type: EventType::Complete,
             exit_reason: None,
@@ -130,7 +122,7 @@ mod tests {
         assert_eq!(edge_all.strategy, Strategy::All);
 
         let edge_any = EdgeDef {
-            from_nodes: vec![a, NodeIndex::new(2)],
+            from: a,
             to: b,
             event_type: EventType::Failed,
             exit_reason: Some("crash".into()),
@@ -138,6 +130,5 @@ mod tests {
             strategy: Strategy::Any,
         };
         assert_eq!(edge_any.strategy, Strategy::Any);
-        assert_eq!(edge_any.from_nodes.len(), 2);
     }
 }

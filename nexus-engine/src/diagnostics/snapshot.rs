@@ -169,7 +169,7 @@ mod tests {
         index.insert("B".into(), b);
 
         let edge = EdgeDef {
-            from_nodes: vec![a],
+            from: a,
             to: b,
             event_type: EventType::Complete,
             exit_reason: None,

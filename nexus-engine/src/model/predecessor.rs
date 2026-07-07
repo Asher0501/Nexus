@@ -17,7 +17,7 @@ pub enum TriggerExpr {
 }
 
 /// The type of event that occurred during node execution.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EventType {
     /// Process exited with code 0.
     #[serde(rename = "complete")]
