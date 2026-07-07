@@ -165,3 +165,4 @@
 - **Node Protocol**: `references/WORKFLOW_REFERENCE.md §4`
 - **Mode Templates**: `references/WORKFLOW_REFERENCE.md §6`
 - **Integration Examples**: `references/WORKFLOW_REFERENCE.md §7`
+- **CLI & Debugging**: `references/WORKFLOW_REFERENCE.md §9`
