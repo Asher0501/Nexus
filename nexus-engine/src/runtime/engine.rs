@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,6 +7,7 @@ use petgraph::graph::NodeIndex;
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::diagnostics::event::{self, EngineLifecycleEvent, NodeLifecycleEvent};
+use crate::diagnostics::snapshot::EngineSnapshot;
 use crate::graph::{DataRouter, Scheduler};
 use crate::model::{EngineConfig, EventType, ValidationError, WorkflowDef};
 use crate::nodeshell::{NodeChunk, NodeContext, NodeExecutor, NodeOutcome, SpawnError};
@@ -49,6 +50,8 @@ pub enum NodeEvent {
         /// The node's ID.
         node_id: String,
     },
+    /// Generic lifecycle event (timeout, spawn failure, etc.).
+    Lifecycle(NodeLifecycleEvent),
 }
 
 /// Internal event type for the engine's event loop.
@@ -91,11 +94,14 @@ pub struct Engine {
     /// Concurrency limiter — permits equal `max_concurrency`.
     semaphore: Arc<Semaphore>,
     /// Sender half of the internal event channel.
-    event_tx: mpsc::UnboundedSender<EngineEvent>,
+    event_tx: mpsc::Sender<EngineEvent>,
     /// Receiver half of the internal event channel.
-    event_rx: mpsc::UnboundedReceiver<EngineEvent>,
+    event_rx: mpsc::Receiver<EngineEvent>,
     /// Optional callback for real-time node lifecycle events.
     event_cb: Option<NodeEventCb>,
+    /// Set of nodes that have been enqueued for execution.
+    /// Used to prevent duplicate NodeReady events (fan-in convergence).
+    enqueued: HashSet<NodeIndex>,
 }
 
 impl fmt::Debug for Engine {
@@ -145,7 +151,7 @@ impl Engine {
         let max_permits = config.effective_max_concurrency();
         let semaphore = Arc::new(Semaphore::new(max_permits));
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(512);
 
         Ok(Self {
             scheduler,
@@ -156,6 +162,7 @@ impl Engine {
             event_tx: tx,
             event_rx: rx,
             event_cb,
+            enqueued: HashSet::new(),
         })
     }
 
@@ -163,10 +170,6 @@ impl Engine {
     ///
     /// The main event loop processes `NodeReady` events until the scheduler
     /// signals convergence (all nodes in a terminal state, queue empty).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RuntimeError::IdleTimeout`] if the event loop is idle too long.
     pub async fn run(&mut self) -> Result<WorkflowResult, RuntimeError> {
         event::emit_engine(&EngineLifecycleEvent::Started {
             node_count: self.scheduler.graph().node_count(),
@@ -174,15 +177,13 @@ impl Engine {
             default_timeout_secs: self.config.default_node_timeout_secs,
         });
 
-        // Seed the scheduler with entry nodes.
-        self.scheduler.enqueue_entries();
-
-        // Publish initial NodeReady events for any enqueued entries.
-        while let Some(node) = self.scheduler.dequeue() {
-            let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: node });
+        // Seed entry nodes.
+        for &entry in self.scheduler.graph().entry_nodes() {
+            if self.enqueued.insert(entry) {
+                let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: entry }).await;
+            }
         }
 
-        let node_timeout = self.config.node_timeout();
         let started_at = std::time::Instant::now();
 
         loop {
@@ -191,27 +192,18 @@ impl Engine {
                 break;
             }
 
-            tokio::select! {
-                event = self.event_rx.recv() => {
-                    match event {
-                        Some(e) => self.handle_event(e).await,
-                        // Channel closed (all senders dropped) — no more events.
-                        None => break,
-                    }
-                }
-                _ = tokio::time::sleep(node_timeout) => {
-                    event::emit_engine(&EngineLifecycleEvent::TimedOut {
-                        duration: started_at.elapsed(),
-                    });
-                    return Err(RuntimeError::IdleTimeout);
-                }
+            match self.event_rx.recv().await {
+                Some(e) => self.handle_event(e).await,
+                // Channel closed (all senders dropped) — no more events.
+                None => break,
             }
         }
 
         event::emit_engine(&EngineLifecycleEvent::Converged {
             duration: started_at.elapsed(),
         });
-        Ok(WorkflowResult {})
+        let snapshot = EngineSnapshot::capture(&self.scheduler, self.running_count, started_at);
+        Ok(WorkflowResult { snapshot })
     }
 
     /// Process a single engine event.
@@ -225,13 +217,6 @@ impl Engine {
             EngineEvent::NodeReady { node_id } => {
                 let nid = self.node_id(node_id);
 
-                // Step 1: acquire a concurrency slot (await if all busy).
-                let _permit = self
-                    .semaphore
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .expect("semaphore closed");
                 self.running_count += 1;
 
                 // Step 2: extract data while &mut self is available.
@@ -267,7 +252,6 @@ impl Engine {
 
                 let inputs = self.data_router.build_input(node_id);
 
-                let max_retries = self.config.max_retries;
                 let tx = self.event_tx.clone();
 
                 // Delegate executor creation to NodeShell — engine does not
@@ -285,9 +269,14 @@ impl Engine {
                     extensions: HashMap::new(),
                 };
 
+                // 设置节点状态为 Running
+                if let Some(ns) = self.scheduler.state_mut().states.get_mut(&node_id) {
+                    ns.status = crate::graph::NodeStatus::Running;
+                }
+
                 // Step 3: spawn execution in a background task so the event
                 // loop can process other NodeReady events concurrently.
-                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<NodeChunk>();
+                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<NodeChunk>(256);
                 let chunk_node_id = nid.clone();
 
                 // Spawn a consumer that forwards chunks to diagnostics and callbacks.
@@ -310,21 +299,55 @@ impl Engine {
 
                 // Spawn the actual node execution; outcome comes back via event.
                 let outcome_tx = tx.clone();
+                let semaphore = self.semaphore.clone();
                 tokio::spawn(async move {
+                    let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
                     let outcome = executor.run(ctx, timeout, &nid, Some(chunk_tx)).await;
                     let _ = outcome_tx.send(EngineEvent::NodeCompleted {
                         node_id,
                         outcome,
-                    });
+                    }).await;
                 });
             }
 
             EngineEvent::NodeCompleted { node_id, outcome } => {
                 let nid = self.node_id(node_id);
 
-                // Step 4: process outcome.
-                match outcome {
-                    Ok(outcome) => {
+                let should_retry = match &outcome {
+                    Ok(outcome) if outcome.timed_out => {
+                        let ev = NodeLifecycleEvent::TimedOut {
+                            node_id: nid.clone(),
+                            timeout_secs: self.config.default_node_timeout_secs,
+                        };
+                        event::emit_lifecycle(&ev);
+                        if let Some(ref cb) = self.event_cb {
+                            cb(NodeEvent::Lifecycle(ev));
+                        }
+                        self.scheduler.retry_node(node_id, self.config.max_timeout_retries)
+                    }
+                    Err(_) => {
+                        let ev = NodeLifecycleEvent::Failed {
+                            node_id: nid.clone(),
+                            exit_reason: "spawn_error".into(),
+                            retry_count: 0,
+                        };
+                        event::emit_lifecycle(&ev);
+                        if let Some(ref cb) = self.event_cb {
+                            cb(NodeEvent::Lifecycle(ev));
+                        }
+                        self.scheduler.retry_node(node_id, self.config.max_timeout_retries)
+                    }
+                    _ => false,
+                };
+
+                if should_retry {
+                    self.data_router.clear_output(node_id);
+                    self.enqueued.remove(&node_id);
+                    let _ = self.event_tx.send(EngineEvent::NodeReady { node_id }).await;
+                } else {
+                    if let Ok(outcome) = &outcome {
+                        self.data_router.store_output(node_id, &outcome.output);
+
                         let event_type = if outcome.timed_out {
                             EventType::Timeout
                         } else if outcome.exit_code == 0 {
@@ -333,107 +356,61 @@ impl Engine {
                             EventType::Failed
                         };
 
-                        // Store output.
-                        self.data_router.store_output(node_id, &outcome.output);
-
-                        // Handle retry logic for failures and timeouts.
-                        if matches!(event_type, EventType::Failed | EventType::Timeout) {
-                            let retry_count = self
-                                .scheduler
-                                .state()
-                                .retry_counts
-                                .get(&node_id)
-                                .copied()
-                                .unwrap_or(0);
-
-                            if self.scheduler.retry_node(node_id, self.config.max_retries) {
-                                event::emit_lifecycle(&NodeLifecycleEvent::Failed {
-                                    node_id: nid,
-                                    exit_reason: outcome
-                                        .exit_reason
-                                        .clone()
-                                        .unwrap_or_else(|| "retrying".into()),
-                                    retry_count,
-                                });
-                                // Retry scheduled — re-enqueue.
-                                let _ = self.event_tx.send(EngineEvent::NodeReady { node_id });
-                                self.running_count -= 1;
-                                return;
-                            }
-                        }
-
-                        // Emit lifecycle event for non-retried outcome.
-                        match event_type {
-                            EventType::Complete => {
-                                event::emit_lifecycle(&NodeLifecycleEvent::Completed {
-                                    node_id: nid.clone(),
-                                    output_size: outcome.output.len(),
-                                });
-                                if let Some(ref cb) = self.event_cb {
-                                    cb(NodeEvent::NodeCompleted { node_id: nid });
-                                }
-                            }
-                            EventType::Failed => {
-                                let reason = outcome
-                                    .exit_reason
-                                    .clone()
-                                    .unwrap_or_else(|| "failed".into());
-                                event::emit_lifecycle(&NodeLifecycleEvent::Failed {
-                                    node_id: nid.clone(),
-                                    exit_reason: reason.clone(),
-                                    retry_count: self
-                                        .scheduler
-                                        .state()
-                                        .retry_counts
-                                        .get(&node_id)
-                                        .copied()
-                                        .unwrap_or(0),
-                                });
-                                if let Some(ref cb) = self.event_cb {
-                                    cb(NodeEvent::NodeFailed { node_id: nid });
-                                }
-                            }
-                            EventType::Timeout => {
-                                event::emit_lifecycle(&NodeLifecycleEvent::TimedOut {
-                                    node_id: nid.clone(),
-                                    timeout_secs: self.config.default_node_timeout_secs,
-                                });
-                                if let Some(ref cb) = self.event_cb {
-                                    cb(NodeEvent::NodeTimedOut { node_id: nid });
-                                }
-                            }
-                        }
-
-                        // Process events through scheduler.
                         let ready_nodes = self.scheduler.handle_event(
                             node_id,
                             event_type,
                             outcome.exit_reason.as_deref(),
                         );
 
+                        match event_type {
+                            EventType::Complete => {
+                                let ev = NodeLifecycleEvent::Completed {
+                                    node_id: nid.clone(),
+                                    output_size: outcome.output.len(),
+                                };
+                                event::emit_lifecycle(&ev);
+                                if let Some(ref cb) = self.event_cb {
+                                    cb(NodeEvent::NodeCompleted { node_id: nid.clone() });
+                                }
+                            }
+                            EventType::Failed => {
+                                let retry_count = self
+                                    .scheduler
+                                    .state()
+                                    .retry_counts
+                                    .get(&node_id)
+                                    .copied()
+                                    .unwrap_or(0);
+                                let reason = outcome.exit_reason.clone().unwrap_or_else(|| "failed".into());
+                                let ev = NodeLifecycleEvent::Failed {
+                                    node_id: nid.clone(),
+                                    exit_reason: reason,
+                                    retry_count,
+                                };
+                                event::emit_lifecycle(&ev);
+                                if let Some(ref cb) = self.event_cb {
+                                    cb(NodeEvent::NodeFailed { node_id: nid.clone() });
+                                }
+                            }
+                            EventType::Timeout => {
+                                // Already emitted above; this arm is hit only when retries exhausted.
+                            }
+                        }
+
                         for target in ready_nodes {
-                            let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: target });
+                            if self.enqueued.insert(target) {
+                                let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: target }).await;
+                            }
+                        }
+                    } else {
+                        if let Some(ns) = self.scheduler.state_mut().states.get_mut(&node_id) {
+                            ns.status = crate::graph::scheduler::NodeStatus::Failed;
                         }
                     }
-                    Err(_e) => {
-                        event::emit_lifecycle(&NodeLifecycleEvent::Failed {
-                            node_id: nid,
-                            exit_reason: "spawn_error".into(),
-                            retry_count: 0,
-                        });
-                        // Spawn failed — treat as Failed with no retry.
-                        let ready_nodes = self.scheduler.handle_event(
-                            node_id,
-                            EventType::Failed,
-                            Some("spawn_error"),
-                        );
-                        for target in ready_nodes {
-                            let _ = self.event_tx.send(EngineEvent::NodeReady { node_id: target });
-                        }
-                    }
+
+                    self.enqueued.remove(&node_id);
                 }
 
-                // Step 5: permit drops here → semaphore slot freed.
                 self.running_count -= 1;
             }
         }
@@ -454,18 +431,14 @@ impl Engine {
 
 /// Result of a completed workflow run.
 #[derive(Debug, Clone)]
-pub struct WorkflowResult {}
+pub struct WorkflowResult {
+    /// Snapshot of engine state at completion (node statuses, elapsed time, etc.).
+    pub snapshot: EngineSnapshot,
+}
 
 /// Runtime errors that can occur during workflow execution.
 #[derive(Debug)]
 pub enum RuntimeError {
-    /// The event loop was idle beyond the default node timeout.
-    ///
-    /// This fires when no events arrive on the channel for `default_node_timeout_secs`,
-    /// indicating the workflow made no progress (e.g., a subprocess hung or the graph
-    /// stalled).  It is distinct from a per-node `process_timeout`, which is enforced
-    /// inside [`SubprocessExecutor::run`].
-    IdleTimeout,
     /// A node could not be spawned for execution.
     SpawnError(String),
 }
@@ -473,9 +446,6 @@ pub enum RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RuntimeError::IdleTimeout => {
-                write!(f, "event loop idle timeout")
-            }
             RuntimeError::SpawnError(msg) => {
                 write!(f, "spawn error: {}", msg)
             }
@@ -494,6 +464,7 @@ impl From<SpawnError> for RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::NodeStatus;
     use crate::model::WorkflowDef;
 
     /// A simple inline workflow definition for testing: A → B (chain).
@@ -605,5 +576,202 @@ mod tests {
         let config = EngineConfig::new(Some(2), 7200, 5);
         assert_eq!(config.effective_max_concurrency(), 2);
         assert_eq!(config.node_timeout(), Duration::from_secs(7200));
+    }
+
+    #[tokio::test]
+    async fn test_single_node_completes() {
+        // Single node A (echo hello), no edges — should converge after A completes.
+        use crate::model::provider::ProviderDef;
+
+        let def = WorkflowDef {
+            nodes: vec![crate::model::workflow::NodeDef {
+                id: "A".into(),
+                providers: vec![ProviderDef::Subprocess {
+                    command: "cmd.exe /c echo hello".into(),
+                }],
+                process_timeout_secs: 10,
+                max_concurrency: None,
+                returns: vec![],
+                max_retries: None,
+            }],
+            edges: vec![],
+            dataflows: vec![],
+        };
+        let config = EngineConfig::new(None, 3600, 3);
+        let mut engine = Engine::new(def, config, None).expect("valid workflow");
+        let result = tokio::time::timeout(Duration::from_secs(30), engine.run()).await;
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => panic!("test_single_node_completes timed out after 30s"),
+        };
+        assert!(result.is_ok(), "single node should complete: {:?}", result);
+
+        let a_idx = engine.scheduler().graph().node_index("A").expect("A exists");
+        let state = engine.scheduler().state();
+        assert_eq!(
+            state.states[&a_idx].status,
+            NodeStatus::Completed,
+            "A should be Completed"
+        );
+        assert!(
+            engine.scheduler().is_converged(),
+            "graph should converge after single node completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chain_execution_a_to_b() {
+        // A(echo chain_a) → B(echo chain_b), verify chain execution and convergence.
+        use crate::model::predecessor::{EventType, SchedulingEdgeDef, TriggerExpr};
+        use crate::model::provider::ProviderDef;
+
+        let def = WorkflowDef {
+            nodes: vec![
+                crate::model::workflow::NodeDef {
+                    id: "A".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo chain_a".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "B".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo chain_b".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+            ],
+            edges: vec![SchedulingEdgeDef {
+                from: "A".into(),
+                to: "B".into(),
+                trigger: TriggerExpr::All,
+                event: EventType::Complete,
+                exit_reason: None,
+                threshold: 1,
+            }],
+            dataflows: vec![],
+        };
+        let config = EngineConfig::new(Some(1), 3600, 3);
+        let mut engine = Engine::new(def, config, None).expect("valid workflow");
+        let result = tokio::time::timeout(Duration::from_secs(30), engine.run()).await;
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => panic!("test_chain_execution_a_to_b timed out after 30s"),
+        };
+        assert!(
+            result.is_ok(),
+            "chain should complete: {:?}",
+            result
+        );
+
+        let a_idx = engine.scheduler().graph().node_index("A").expect("A exists");
+        let b_idx = engine.scheduler().graph().node_index("B").expect("B exists");
+        let state = engine.scheduler().state();
+        assert_eq!(
+            state.states[&a_idx].status,
+            NodeStatus::Completed,
+            "A should be Completed"
+        );
+        assert_eq!(
+            state.states[&b_idx].status,
+            NodeStatus::Completed,
+            "B should be Completed"
+        );
+        assert!(
+            engine.scheduler().is_converged(),
+            "chain graph should converge"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fan_out() {
+        // A → B, A → C, verify both B and C execute.
+        use crate::model::predecessor::{EventType, SchedulingEdgeDef, TriggerExpr};
+        use crate::model::provider::ProviderDef;
+
+        let def = WorkflowDef {
+            nodes: vec![
+                crate::model::workflow::NodeDef {
+                    id: "A".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo fan_out_a".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "B".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo fan_out_b".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+                crate::model::workflow::NodeDef {
+                    id: "C".into(),
+                    providers: vec![ProviderDef::Subprocess {
+                        command: "cmd.exe /c echo fan_out_c".into(),
+                    }],
+                    process_timeout_secs: 10,
+                    max_concurrency: None,
+                    returns: vec![],
+                    max_retries: None,
+                },
+            ],
+            edges: vec![
+                SchedulingEdgeDef {
+                    from: "A".into(),
+                    to: "B".into(),
+                    trigger: TriggerExpr::All,
+                    event: EventType::Complete,
+                    exit_reason: None,
+                    threshold: 1,
+                },
+                SchedulingEdgeDef {
+                    from: "A".into(),
+                    to: "C".into(),
+                    trigger: TriggerExpr::All,
+                    event: EventType::Complete,
+                    exit_reason: None,
+                    threshold: 1,
+                },
+            ],
+            dataflows: vec![],
+        };
+        let config = EngineConfig::new(Some(2), 3600, 3);
+        let mut engine = Engine::new(def, config, None).expect("valid workflow");
+        let result = tokio::time::timeout(Duration::from_secs(30), engine.run()).await;
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => panic!("test_fan_out timed out after 30s"),
+        };
+        assert!(
+            result.is_ok(),
+            "fan-out should complete: {:?}",
+            result
+        );
+
+        let state = engine.scheduler().state();
+        let a_idx = engine.scheduler().graph().node_index("A").expect("A");
+        let b_idx = engine.scheduler().graph().node_index("B").expect("B");
+        let c_idx = engine.scheduler().graph().node_index("C").expect("C");
+        assert_eq!(state.states[&a_idx].status, NodeStatus::Completed);
+        assert_eq!(state.states[&b_idx].status, NodeStatus::Completed);
+        assert_eq!(state.states[&c_idx].status, NodeStatus::Completed);
+        assert!(
+            engine.scheduler().is_converged(),
+            "fan-out graph should converge"
+        );
     }
 }

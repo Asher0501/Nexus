@@ -55,6 +55,12 @@ impl DataRouter {
         self.outputs.insert(node_index, output.to_string());
     }
 
+    /// Remove the stored output for a node, typically called before retrying it
+    /// so the downstream does not read stale data from the previous execution.
+    pub fn clear_output(&mut self, node_index: NodeIndex) {
+        self.outputs.remove(&node_index);
+    }
+
     /// Build an input map for a target node by looking up its registered
     /// data flows.
     ///
@@ -139,6 +145,24 @@ mod tests {
         let router = make_router(vec![]);
         let inputs = router.build_input(NodeIndex::new(0));
         assert!(inputs.is_empty());
+    }
+
+    #[test]
+    fn test_clear_output_removes_stored_data() {
+        let mut router = make_router(vec![df("A", "B")]);
+        router.store_output(NodeIndex::new(0), "stale");
+        router.clear_output(NodeIndex::new(0));
+
+        // After clear, build_input should yield empty string (as if never stored).
+        let inputs = router.build_input(NodeIndex::new(1));
+        assert_eq!(inputs.get("A"), Some(&String::new()));
+    }
+
+    #[test]
+    fn test_clear_output_noop_on_absent_node() {
+        let mut router = make_router(vec![]);
+        // Should not panic.
+        router.clear_output(NodeIndex::new(99));
     }
 
     #[test]
