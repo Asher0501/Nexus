@@ -358,34 +358,82 @@ function initDAG(containerId, graphData) {
     var nodes = graphData.nodes || [];
     var edges = graphData.edges || [];
 
-    dagNodes = new vis.DataSet(nodes.map(function(n) { return {
-      id: n.id, label: n.label||n.id,
-      color: { background: STATUS_COLORS.Pending, border: '#334155' },
-      borderWidth: 2, font: { color: '#e2e8f0', size: 14 },
-      shape: 'box', margin: 14, widthConstraint: { minimum: 80, maximum: 140 },
-    }; }));
+    // Assign positions: spread nodes on a grid to separate edges visually.
+    // Levels are determined by BFS from entry nodes (no incoming edges).
+    var inDegree = {}, outEdges = {};
+    nodes.forEach(function(n) { inDegree[n.id] = 0; outEdges[n.id] = []; });
+    edges.forEach(function(e) { inDegree[e.to] = (inDegree[e.to]||0) + 1; outEdges[e.from].push(e); });
 
+    // Detect cycle edges: if A→B and B→A both exist, put them at same level
+    var cyclePairs = {};
+    edges.forEach(function(e) {
+      var rev = edges.some(function(r) { return r.from === e.to && r.to === e.from; });
+      if (rev) { cyclePairs[e.from] = e.to; cyclePairs[e.to] = e.from; }
+    });
+
+    var level = {}, maxLevel = 0;
+    function assignLevel(id, lvl) {
+      if (level[id] !== undefined) return;
+      level[id] = lvl;
+      if (lvl > maxLevel) maxLevel = lvl;
+      (outEdges[id]||[]).forEach(function(e) {
+        // Cycle partner stays at same level
+        var nl = cyclePairs[e.to] ? lvl : lvl + 1;
+        assignLevel(e.to, nl);
+      });
+    }
+    nodes.forEach(function(n) { if (!inDegree[n.id]) assignLevel(n.id, 0); });
+    nodes.forEach(function(n) { if (level[n.id]===undefined) assignLevel(n.id, maxLevel+1); });
+
+    // Count nodes per level to stack them vertically
+    var countPerLevel = {};
+    nodes.forEach(function(n) { var l=level[n.id]; countPerLevel[l]=(countPerLevel[l]||0)+1; });
+
+    var idxPerLevel = {};
+    var xGap = 280, yGap = 180;
+    dagNodes = new vis.DataSet(nodes.map(function(n) {
+      var l = level[n.id];
+      var idx = idxPerLevel[l] || 0;
+      idxPerLevel[l] = idx + 1;
+      // Center nodes vertically within their level
+      var total = countPerLevel[l] || 1;
+      var yOff = (idx - (total-1)/2) * yGap;
+      return {
+        id: n.id, label: n.label||n.id,
+        x: l * xGap, y: yOff,
+        fixed: { x: true, y: true },
+        color: { background: STATUS_COLORS.Pending, border: '#334155' },
+        borderWidth: 2, font: { color: '#e2e8f0', size: 14 },
+        shape: 'box', margin: 14, widthConstraint: { minimum: 80, maximum: 140 },
+      };
+    }));
+
+    // Assign distinct curve styles to avoid overlapping edges.
+    // Count edges per (from,to) pair to stagger curves.
+    var edgeKey = {};
+    var styles = ['curvedCW', 'curvedCCW', 'cubicBezier'];
     dagEdges = new vis.DataSet(edges.map(function(e, i) {
+      var key = e.from + '->' + e.to;
+      var idx = edgeKey[key] || 0;
+      edgeKey[key] = idx + 1;
+      // Cycle returns (fix->review) use opposite curve direction
+      var isCycle = (e.from === 'fix' && e.to === 'review');
+      var st = isCycle ? 'curvedCCW' : styles[idx % styles.length];
+      var r = isCycle ? 0.3 : (0.15 + idx * 0.1);
       return {
         id: 'e'+i, from: e.from, to: e.to, label: e.label||'',
         arrows: { to: { enabled: true } },
-        color: { color: '#64748b' },
-        width: 1.5,
+        color: { color: isCycle ? '#f59e0b' : '#64748b' },
+        width: isCycle ? 2 : 1.5,
         font: { color: '#94a3b8', size: 10, strokeWidth: 0 },
-        smooth: { type: 'cubicBezier' },
+        smooth: { type: st, roundness: r },
       };
     }));
 
     dagNetwork = new vis.Network(container, { nodes: dagNodes, edges: dagEdges }, {
-      layout: {
-        hierarchical: {
-          enabled: true, direction: 'LR', sortMethod: 'directed',
-          levelSeparation: 250, nodeSpacing: 180,
-          blockShifting: true, edgeMinimization: false,
-        },
-      },
-      physics: false,
-      interaction: { hover: true },
+      layout: { randomSeed: 1 },
+      physics: { enabled: false },
+      interaction: { hover: true, dragNodes: false },
     });
 
     dagReady = true;
