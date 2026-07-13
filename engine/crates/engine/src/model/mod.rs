@@ -3,18 +3,17 @@
 //! This module defines the fundamental types that describe a workflow:
 //! - [`WorkflowDef`]: The top-level workflow definition
 //! - [`NodeDef`]: Individual node definitions
-//! - [`PredecessorDef`]: Declarations of predecessor relationships
-//! - [`ProviderDef`]: How a node is executed (subprocess, HTTP, etc.)
+//! - [`ProviderDef`]: How a node is executed (subprocess, shell, HTTP, LLM)
 //! - [`EngineConfig`]: Runtime engine configuration
 //! - [`ValidationError`]: Error types
 
 /// Workflow and node definitions (`WorkflowDef`, `NodeDef`).
 pub mod workflow;
 
-/// Provider type definitions (`ProviderDef` enum with Subprocess/Http variants).
+/// Provider type definitions (`ProviderDef` enum with Subprocess/Shell/Http/Llm variants).
 pub mod provider;
 
-/// Predecessor relationship types (`PredecessorDef`, `TriggerExpr`, `EventType`).
+/// Predecessor relationship types (`SchedulingEdgeDef`, `DataFlowDef`, `TriggerExpr`, `EventType`).
 pub mod predecessor;
 
 /// Engine runtime configuration (`EngineConfig`).
@@ -23,10 +22,10 @@ pub mod config;
 /// Error types for validation and build phases (`ValidationError`).
 pub mod error;
 
-pub use workflow::{WorkflowDef, NodeDef};
+pub use workflow::{RoutePolicyDef, WorkflowDef, NodeDef};
 pub use provider::ProviderDef;
 pub use predecessor::{
-    default_threshold, DataFlowDef, EventType, PredecessorDef, SchedulingEdgeDef, TriggerExpr,
+    default_threshold, DataFlowDef, EventType, SchedulingEdgeDef, TriggerExpr,
 };
 pub use config::EngineConfig;
 pub use error::ValidationError;
@@ -380,6 +379,36 @@ mod tests {
             }
         );
 
+        // Llm (minimal: command only)
+        let llm: ProviderDef = serde_json::from_str(
+            r#"{"type":"llm","command":"claude -p \"{{prompt}}\""}"#,
+        )
+        .expect("llm minimal");
+        assert_eq!(
+            llm,
+            ProviderDef::Llm {
+                command: "claude -p \"{{prompt}}\"".into(),
+                prompt: None,
+                routes: vec![],
+                max_tokens: None,
+            }
+        );
+
+        // Llm with all fields
+        let llm_full: ProviderDef = serde_json::from_str(
+            r#"{"type":"llm","command":"opencode run -- \"{{prompt}}\"","prompt":"Review: {{inputs.code}}","routes":["ok","err"],"max_tokens":8192}"#,
+        )
+        .expect("llm full");
+        assert_eq!(
+            llm_full,
+            ProviderDef::Llm {
+                command: "opencode run -- \"{{prompt}}\"".into(),
+                prompt: Some("Review: {{inputs.code}}".into()),
+                routes: vec!["ok".into(), "err".into()],
+                max_tokens: Some(8192),
+            }
+        );
+
         // Http without method（默认 None）
         let http2: ProviderDef = serde_json::from_str(
             r#"{"type":"http","url":"https://example.com/api"}"#,
@@ -408,6 +437,7 @@ mod tests {
             ValidationError::InputSourceNotFound { node_id: "g".into(), source_id: "h".into() },
             ValidationError::InputSourceUnreachable { node_id: "i".into(), source_id: "j".into() },
             ValidationError::BuildInvariant { description: "k".into() },
+            ValidationError::ZeroTimeout { node_id: "l".into() },
         ];
 
         for (i, err) in cases.iter().enumerate() {
@@ -419,21 +449,23 @@ mod tests {
     }
 
     #[test]
-    fn test_e2e_predecessor_def_with_all_fields() {
-        // 端到端 8：PredecessorDef 多字段组合
+    fn test_e2e_scheduling_edge_def_with_all_fields() {
+        // 端到端 8：SchedulingEdgeDef 多字段组合（替代已移除的 PredecessorDef）
         let json = r#"{
-            "node_id": "upstream",
+            "from": "upstream",
+            "to": "downstream",
             "trigger": "any",
             "event": "failed",
             "exit_reason": "crash",
             "threshold": 3
         }"#;
-        let pred: PredecessorDef = serde_json::from_str(json)
-            .expect("predecessor with all fields");
-        assert_eq!(pred.node_id, "upstream");
-        assert_eq!(pred.trigger, TriggerExpr::Any);
-        assert_eq!(pred.event, EventType::Failed);
-        assert_eq!(pred.exit_reason.as_deref(), Some("crash"));
-        assert_eq!(pred.threshold, 3);
+        let edge: SchedulingEdgeDef = serde_json::from_str(json)
+            .expect("scheduling edge with all fields");
+        assert_eq!(edge.from, "upstream");
+        assert_eq!(edge.to, "downstream");
+        assert_eq!(edge.trigger, TriggerExpr::Any);
+        assert_eq!(edge.event, EventType::Failed);
+        assert_eq!(edge.exit_reason.as_deref(), Some("crash"));
+        assert_eq!(edge.threshold, 3);
     }
 }

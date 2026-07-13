@@ -1,0 +1,15 @@
+{
+  "nodes": [
+    {
+      "id": "code_review",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "opencode run --format json --dangerously-skip-permissions --model anthropic/claude-sonnet-4-20250514 -- \"检查 src/ 下所有 TypeScript 文件中的潜在 bug，输出修复建议\""
+        }
+      ],
+      "process_timeout_secs": 300
+    }
+  ],
+  "edges": []
+}

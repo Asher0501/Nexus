@@ -1,0 +1,19 @@
+{
+  "nodes": [
+    {
+      "id": "analyze",
+      "providers": [
+        {
+          "type": "llm",
+          "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
+          "prompt": "You are a code analysis expert. Analyze the given code and output your findings as JSON: {\"route\":\"clean|issues_found|error\",\"content\":\"your analysis\"}.",
+          "routes": ["clean", "issues_found", "error"]
+        }
+      ],
+      "process_timeout_secs": 300,
+      "returns": ["clean", "issues_found", "error"]
+    }
+  ],
+  "edges": [],
+  "dataflows": []
+}

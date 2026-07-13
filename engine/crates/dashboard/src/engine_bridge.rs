@@ -14,6 +14,8 @@ use crate::ws::{ServerMessage, WsRoom};
 /// Validate a workflow definition JSON string.
 ///
 /// Returns `Ok(())` on success, or `Err` with a list of human-readable error messages.
+/// This function is part of the public API; callers include the REST layer
+/// and external embedders that use the dashboard as a library.
 #[allow(dead_code)]
 pub fn validate_workflow(json: &str) -> Result<(), Vec<String>> {
     let def: WorkflowDef =

@@ -1,0 +1,53 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "python scripts/start_node.py"
+        }
+      ],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "review",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "python scripts/review_node.py"
+        }
+      ],
+      "process_timeout_secs": 300
+    },
+    {
+      "id": "fix",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "python scripts/fix_opencode.py"
+        }
+      ],
+      "process_timeout_secs": 300
+    },
+    {
+      "id": "retro",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "python scripts/retro_node.py"
+        }
+      ],
+      "process_timeout_secs": 60
+    }
+  ],
+  "edges": [
+    { "from": "start", "to": "review", "trigger": "any", "event": "complete" },
+    { "from": "review", "to": "fix", "trigger": "any", "event": "complete", "exit_reason": "rejected" },
+    { "from": "fix", "to": "review", "trigger": "any", "event": "complete" },
+    { "from": "review", "to": "retro", "trigger": "any", "event": "complete", "exit_reason": "approved" }
+  ],
+  "dataflows": [
+    { "from": "fix", "to": "review" }
+  ]
+}

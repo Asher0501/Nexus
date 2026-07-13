@@ -67,6 +67,12 @@ pub enum ValidationError {
         /// Human-readable description of which invariant failed.
         description: String,
     },
+
+    /// A node has process_timeout_secs set to 0 (would timeout immediately).
+    ZeroTimeout {
+        /// The node's ID.
+        node_id: String,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -123,6 +129,9 @@ impl fmt::Display for ValidationError {
             }
             Self::BuildInvariant { description } => {
                 write!(f, "build invariant failure: {description}")
+            }
+            Self::ZeroTimeout { node_id } => {
+                write!(f, "node '{}' has process_timeout_secs = 0 (would timeout immediately)", node_id)
             }
         }
     }

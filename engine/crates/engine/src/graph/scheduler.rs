@@ -8,8 +8,8 @@ use std::collections::{HashMap, VecDeque};
 
 use petgraph::graph::NodeIndex;
 
-use crate::graph::edge::{EdgeDef, EdgeState, Strategy};
-use crate::graph::graph_def::{GraphDef, NodeTransfer};
+use crate::graph::edge::{EdgeState, Strategy};
+use crate::graph::graph_def::GraphDef;
 use crate::model::predecessor::EventType;
 
 /// Status of a single node during graph execution.
@@ -92,6 +92,9 @@ pub struct RuntimeState {
     pub(crate) counters: HashMap<NodeIndex, NodeCounters>,
     /// Per-node retry attempt counts.
     pub(crate) retry_counts: HashMap<NodeIndex, u64>,
+    /// Per-node total execution counts (how many times each node has run).
+    /// Incremented on every `NodeReady`, not just retries.
+    pub(crate) run_counts: HashMap<NodeIndex, u64>,
     /// Per-edge runtime state (indexed parallel to [`GraphDef::edges`]).
     pub(crate) edge_states: Vec<EdgeState>,
     /// Queue of nodes ready to execute.
@@ -99,6 +102,11 @@ pub struct RuntimeState {
     /// Tracks how many All-strategy incoming edges have not yet fired for each
     /// downstream node. When this reaches 0, the node is ready to enqueue.
     pub(crate) fan_in_pending: HashMap<NodeIndex, usize>,
+    /// Whether the node's most recent execution timed out (not retried).
+    /// Populated by the engine when a `NodeCompleted` with `timed_out=true`
+    /// is not retried, so downstream retries can detect that the previous
+    /// attempt timed out.
+    pub(crate) last_timed_out: HashMap<NodeIndex, bool>,
 }
 
 /// The graph scheduler that drives node execution via event handling.
@@ -129,12 +137,19 @@ impl Scheduler {
         let mut states: HashMap<NodeIndex, NodeState> = HashMap::new();
         let mut counters: HashMap<NodeIndex, NodeCounters> = HashMap::new();
         let mut retry_counts: HashMap<NodeIndex, u64> = HashMap::new();
+        let mut run_counts: HashMap<NodeIndex, u64> = HashMap::new();
 
         for idx in graph.node_indices() {
             states.insert(idx, NodeState::default());
             counters.insert(idx, NodeCounters::default());
             retry_counts.insert(idx, 0);
+            run_counts.insert(idx, 0);
         }
+
+        let last_timed_out: HashMap<NodeIndex, bool> = graph
+            .node_indices()
+            .map(|idx| (idx, false))
+            .collect();
 
         let edge_states: Vec<EdgeState> = (0..graph.edge_count())
             .map(|_| EdgeState::default())
@@ -156,47 +171,27 @@ impl Scheduler {
                 states,
                 counters,
                 retry_counts,
+                run_counts,
                 edge_states,
                 ready_queue: VecDeque::new(),
                 fan_in_pending,
+                last_timed_out,
             },
         }
     }
 
-    /// Handle an event emitted by a node.
+    /// Update the emitting node's status and event counters based on an event.
     ///
-    /// Processes the event through all outgoing edges of the given node.
-    /// When an edge's conditions are satisfied (strategy, threshold,
-    /// exit_reason), the edge fires and the target node is returned in the
-    /// result vector.
-    ///
-    /// # Algorithm
-    ///
-    /// For each outgoing edge of `node`:
-    /// 1. Skip if the edge has already triggered
-    /// 2. Skip if the edge's event type does not match the incoming event
-    /// 3. Skip if the edge has an exit_reason filter that does not match
-    /// 4. Increment the edge's event counter
-    /// 5. If the counter meets or exceeds the threshold and the edge hasn't
-    ///    fired: mark as triggered and apply the strategy:
-    ///    - `Strategy::Any`: immediately enqueue the target node
-    ///    - `Strategy::All`: decrement `fan_in_pending[target]`; enqueue only
-    ///      when `fan_in_pending[target]` reaches 0 (all incoming All-edges
-    ///      have fired)
-    ///
-    /// # Returns
-    ///
-    /// A vector of [`NodeIndex`] values for nodes that should be enqueued as a
-    /// result of this event.
-    pub fn handle_event(
+    /// This is the **bookkeeping** side of event processing — it records what
+    /// happened to the node (Completed, Failed, TimedOut) and maintains per-event
+    /// counters. It is conceptually separate from f_v (the transfer function)
+    /// which determines which downstream nodes to trigger.
+    fn apply_event_to_node_state(
         &mut self,
         node: NodeIndex,
         event: EventType,
         exit_reason: Option<&str>,
-    ) -> Vec<NodeIndex> {
-        let mut ready: Vec<NodeIndex> = Vec::new();
-
-        // Update node state based on event type.
+    ) {
         if let Some(ns) = self.state.states.get_mut(&node) {
             match event {
                 EventType::Complete => {
@@ -218,7 +213,6 @@ impl Scheduler {
             }
         }
 
-        // Increment per-event-type counter.
         if let Some(counter) = self.state.counters.get_mut(&node) {
             match event {
                 EventType::Complete => counter.complete += 1,
@@ -226,74 +220,51 @@ impl Scheduler {
                 EventType::Timeout => counter.timeout += 1,
             }
         }
+    }
 
-        // Look up the transfer for this node.
-        let transfer: Option<&NodeTransfer> = self.graph.transfers().get(&node);
-        let transfer = match transfer {
-            Some(t) => t,
-            None => return ready,
+    /// Handle an event emitted by a node — implements f_v via
+    /// [`NodeTransfer::evaluate`].
+    ///
+    /// Processes the event through all outgoing edges of the given node.
+    /// When an edge's conditions are satisfied (strategy, threshold,
+    /// exit_reason), the edge fires and the target node is returned in the
+    /// result vector.
+    ///
+    /// This method has two phases:
+    /// 1. **Node bookkeeping**: update the emitting node's status & counters
+    ///    ([`apply_event_to_node_state`]).
+    /// 2. **Transfer function f_v**: delegate to [`NodeTransfer::evaluate`]
+    ///    which implements the h_e + g_e decomposition.
+    ///
+    /// Edges have no "triggered" state — every event independently evaluates
+    /// all matching edges (design philosophy: h_e is stateless).
+    ///
+    /// # Returns
+    ///
+    /// A vector of [`NodeIndex`] values for nodes that should be enqueued as a
+    /// result of this event.
+    pub fn handle_event(
+        &mut self,
+        node: NodeIndex,
+        event: EventType,
+        exit_reason: Option<&str>,
+    ) -> Vec<NodeIndex> {
+        // Phase 1: node bookkeeping (status, counters).
+        self.apply_event_to_node_state(node, event, exit_reason);
+
+        // Phase 2: f_v — transfer function.
+        let Some(transfer) = self.graph.transfers().get(&node) else {
+            return Vec::new();
         };
 
-        let edges: &[EdgeDef] = self.graph.edges();
-
-        for &edge_idx in &transfer.out_edge_indices {
-            let edge: &EdgeDef = &edges[edge_idx];
-            let es: &mut EdgeState = &mut self.state.edge_states[edge_idx];
-
-            // 1. Already triggered — skip.
-            if es.triggered {
-                continue;
-            }
-
-            // 2. Event type mismatch — skip.
-            if edge.event_type != event {
-                continue;
-            }
-
-            // 3. Exit reason filter mismatch — skip.
-            if let Some(ref expected_reason) = edge.exit_reason {
-                match exit_reason {
-                    Some(actual) if actual == expected_reason.as_str() => {}
-                    _ => continue,
-                }
-            }
-
-            // 4. Increment counter.
-            es.event_count += 1;
-
-            // 5. Check threshold and trigger.
-            if es.event_count >= edge.threshold {
-                es.triggered = true;
-
-                match edge.strategy {
-                    Strategy::Any => {
-                        // Any: immediately enqueue the downstream node.
-                        self.state.ready_queue.push_back(edge.to);
-                        ready.push(edge.to);
-                    }
-                    Strategy::All => {
-                        // All: decrement the fan_in_pending counter for the target.
-                        if let Some(pending) = self.state.fan_in_pending.get_mut(&edge.to) {
-                            if *pending > 0 {
-                                *pending -= 1;
-                            }
-                        }
-                        // Only enqueue when ALL All-strategy incoming edges have fired.
-                        let all_ready = self.state.fan_in_pending
-                            .get(&edge.to)
-                            .map(|&p| p == 0)
-                            .unwrap_or(true);
-                        if all_ready {
-                            self.state.ready_queue.push_back(edge.to);
-                            ready.push(edge.to);
-                        }
-                        // pending > 0 → still waiting for other incoming edges.
-                    }
-                }
-            }
-        }
-
-        ready
+        transfer.evaluate(
+            self.graph.edges(),
+            &mut self.state.edge_states,
+            event,
+            exit_reason,
+            &mut self.state.fan_in_pending,
+            &mut self.state.ready_queue,
+        )
     }
 
     /// Dequeue the next node ready for execution.
@@ -321,18 +292,13 @@ impl Scheduler {
     }
 
     /// Enqueue a node for execution.
+    ///
+    /// NOTE: This does NOT increment `run_counts`. The engine's event-loop
+    /// handler (`handle_node_ready`) is the single authority for run-count
+    /// tracking. Callers that bypass the event loop (e.g. tests) must
+    /// manage run counts themselves if they need accurate values.
     pub fn enqueue(&mut self, node: NodeIndex) {
         self.state.ready_queue.push_back(node);
-    }
-
-    /// Enqueue all entry nodes.
-    ///
-    /// Call this at the start of graph execution to seed the ready queue.
-    pub fn enqueue_entries(&mut self) {
-        let entries: Vec<NodeIndex> = self.graph.entry_nodes().to_vec();
-        for &entry in &entries {
-            self.enqueue(entry);
-        }
     }
 
     /// Attempt to retry a failed node.
@@ -361,25 +327,33 @@ impl Scheduler {
         }
 
         // Reset outgoing edge states so they can fire again on re-execution.
+        // fan_in_pending is NOT restored here — the All-strategy reset logic
+        // in handle_event already resets fan_in_pending when the downstream
+        // node is enqueued, so it is already at the correct value.
         if let Some(transfer) = self.graph.transfers().get(&node) {
             for &edge_idx in &transfer.out_edge_indices {
                 if let Some(es) = self.state.edge_states.get_mut(edge_idx) {
-                    es.triggered = false;
                     es.event_count = 0;
-                }
-                // Restore fan_in_pending for All-strategy edges — the downstream
-                // node is now waiting for this edge to fire again.
-                if let Some(edge) = self.graph.edges().get(edge_idx) {
-                    if edge.strategy == Strategy::All {
-                        if let Some(pending) = self.state.fan_in_pending.get_mut(&edge.to) {
-                            *pending += 1;
-                        }
-                    }
                 }
             }
         }
 
         true
+    }
+
+    /// Mark all nodes that are still `Pending` as `Skipped`.
+    ///
+    /// Called by the engine's watchdog when it is about to force-exit the
+    /// event loop.  This ensures [`is_converged`](Scheduler::is_converged)
+    /// returns `true` even when some branches in a conditional routing graph
+    /// were never triggered (e.g. a `reviewer → approved | rejected` split
+    /// where only `approved` fired and `rejected` stayed `Pending`).
+    pub fn mark_pending_nodes_skipped(&mut self) {
+        for state in self.state.states.values_mut() {
+            if state.status == NodeStatus::Pending {
+                state.status = NodeStatus::Skipped;
+            }
+        }
     }
 
     /// Check whether the graph execution has converged.
@@ -422,6 +396,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::edge::EdgeDef;
     use crate::graph::edge::Strategy;
     use crate::graph::graph_def::{NodeData, NodeParams, NodeTransfer};
     use petgraph::stable_graph::StableDiGraph;
@@ -433,11 +408,13 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
 
         let mut index = HashMap::new();
@@ -489,16 +466,19 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let c = graph.add_node(NodeData {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
 
         let mut index = HashMap::new();
@@ -566,16 +546,19 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let c = graph.add_node(NodeData {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
 
         let mut index = HashMap::new();
@@ -658,8 +641,8 @@ mod tests {
             "edge should target B"
         );
 
-        // After triggering, edge should be marked triggered.
-        assert!(scheduler.state.edge_states[0].triggered);
+        // After triggering, edge event_count should reflect the match.
+        assert!(scheduler.state.edge_states[0].event_count >= 1);
     }
 
     // ── 2. Event type mismatch ────────────────────────────
@@ -687,16 +670,19 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let c = graph.add_node(NodeData {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
 
         let mut index = HashMap::new();
@@ -802,11 +788,13 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
 
         let mut index = HashMap::new();
@@ -881,11 +869,13 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
 
         let mut index = HashMap::new();
@@ -956,16 +946,19 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let c = graph.add_node(NodeData {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
 
         let mut index = HashMap::new();
@@ -1112,18 +1105,12 @@ mod tests {
         assert_eq!(ready.len(), 1, "A should trigger B");
         assert_eq!(ready[0], b, "should target B");
 
-        // Verify edge is triggered.
-        assert!(
-            scheduler.state.edge_states[0].triggered,
-            "edge should be triggered after first fire"
-        );
+        // Verify edge matched (event_count incremented).
+        assert_eq!(scheduler.state.edge_states[0].event_count, 1,
+            "edge event_count should be 1 after first fire");
 
         // Retry resets edge state.
         assert!(scheduler.retry_node(a, 3), "retry should succeed");
-        assert!(
-            !scheduler.state.edge_states[0].triggered,
-            "edge triggered should be reset after retry"
-        );
         assert_eq!(
             scheduler.state.edge_states[0].event_count,
             0,
@@ -1166,12 +1153,15 @@ mod tests {
         let r2 = scheduler.handle_event(b, EventType::Complete, None);
         assert_eq!(r2.len(), 1, "B completes → C ready");
 
-        // B completes again → edge 1 already triggered.
+        // B completes again → f_v recomputes, B→C fires again.
+        // Note: no "triggered gate" is intentional — h_e is stateless by design
+        // (see theory/DESIGN_PHILOSOPHY.md §三). Every event independently evaluates
+        // all matching edges. The cycle continues until fan_in_pending resets.
+        // C is ready again because fan_in_pending[C] goes from 2 (A,B) to 0 (B alone).
+        // A hasn't completed this round, so C is not yet ready.
         let r3 = scheduler.handle_event(b, EventType::Complete, None);
-        assert!(
-            r3.is_empty(),
-            "already-triggered edge should not fire again"
-        );
+        assert!(r3.is_empty(),
+            "B alone should not trigger C — A hasn't completed this round");
     }
 
     // ── 9. Enqueue / dequeue ──────────────────────────────
@@ -1192,14 +1182,18 @@ mod tests {
         assert_eq!(scheduler.dequeue(), None, "queue should be empty after dequeue");
     }
 
-    // ── 10. Enqueue entries ───────────────────────────────
+    // ── 10. Enqueue entries (event-loop style) ────────────
 
     #[test]
     fn test_enqueue_entries() {
+        // The engine seeds entry nodes via event_tx.send(NodeReady), not via
+        // scheduler.enqueue_entries().  This test verifies the manual enqueue
+        // path still works for scenarios that bypass the event loop (tests,
+        // diagnostics, embedded use).
         let mut scheduler = Scheduler::new(build_chain_graph());
-        scheduler.enqueue_entries();
-
         let a = scheduler.graph().node_index("A").expect("A should exist");
+        scheduler.enqueue(a);
+
         assert_eq!(scheduler.dequeue(), Some(a));
         assert_eq!(scheduler.dequeue(), None);
     }
@@ -1271,9 +1265,7 @@ mod tests {
             "B should be marked as Completed"
         );
 
-        // A times out.
-        // Reset A first by re-creating... Actually, just check that timeout works.
-        // We need a new scheduler because A's state was already set.
+        // Timeout state is tested independently in `test_handle_event_timeout()`.
     }
 
     #[test]
@@ -1313,7 +1305,11 @@ mod tests {
             scheduler.is_converged(),
             "empty graph should be converged"
         );
-        scheduler.enqueue_entries(); // no-op, no crash
+        // Verify that enqueue on an empty graph doesn't crash (defensive).
+        // NodeIndex(0) doesn't exist in an empty graph, but enqueue only
+        // touches ready_queue — it's a caller responsibility to pass valid
+        // indices. We just verify no panic.
+        scheduler.enqueue(NodeIndex::new(0));
     }
 
     // ── 15. Fan-in All: waits for all upstreams ───────────
@@ -1337,28 +1333,31 @@ mod tests {
         assert_eq!(ready.len(), 1, "All: both A and B complete → C ready");
         assert_eq!(ready[0], c, "C should be the ready node");
 
-        // Verify fan_in_pending is now 0 for C.
+        // After C is enqueued, fan_in_pending[C] is reset to 2 (next round).
         let pending = scheduler.state.fan_in_pending.get(&c).copied().unwrap_or(0);
-        assert_eq!(pending, 0, "fan_in_pending for C should be 0 after both fire");
+        assert_eq!(pending, 2, "fan_in_pending for C should be reset to 2 for next round");
     }
 
     #[test]
-    fn test_fan_in_all_only_triggers_once() {
-        // Same graph: A → C (All), B → C (All). After both fire, C is ready.
-        // Further events on A or B should not re-enqueue C.
+    fn test_fan_in_all_round_resets() {
+        // A → C (All), B → C (All). After both fire, C is ready and
+        // fan_in_pending[C] resets to 2. Next round: A and B complete
+        // again → C is ready again.
         let mut scheduler = Scheduler::new(build_fan_in_graph());
         let a = scheduler.graph().node_index("A").expect("A exists");
         let b = scheduler.graph().node_index("B").expect("B exists");
 
-        // Both complete → C ready.
+        // Round 1: Both complete → C ready once.
         scheduler.handle_event(a, EventType::Complete, None);
         scheduler.handle_event(b, EventType::Complete, None);
-        assert_eq!(scheduler.dequeue_all().len(), 1, "C should be ready once");
+        assert_eq!(scheduler.dequeue_all().len(), 1, "C should be ready once (round 1)");
 
-        // More events on A/B — edges already triggered, no-op.
+        // Round 2: A and B complete again → C ready again.
+        // Note: no triggered gate — h_e is stateless by design. Each round is
+        // an independent evaluation cycle; the edge does not remember past fires.
         scheduler.handle_event(a, EventType::Complete, None);
         scheduler.handle_event(b, EventType::Complete, None);
-        assert!(!scheduler.has_ready(), "no more ready nodes after all edges spent");
+        assert_eq!(scheduler.dequeue_all().len(), 1, "C should be ready again (round 2)");
     }
 
     // ── 16. Fan-out: one event triggers multiple edges ────
@@ -1370,5 +1369,109 @@ mod tests {
 
         let ready = scheduler.handle_event(a, EventType::Complete, None);
         assert_eq!(ready.len(), 2, "fan-out A should trigger both B and C");
+    }
+
+    // ── 17. Directed cycle: A → B → A fires repeatedly ──
+
+    fn build_directed_cycle_graph() -> GraphDef {
+        // A → B (Any, Complete), B → A (Any, Complete)
+        let mut graph = StableDiGraph::new();
+        let a = graph.add_node(NodeData {
+            id: "A".into(), providers: vec![], process_timeout_secs: 10, route_policy: None, max_retries: None,
+        });
+        let b = graph.add_node(NodeData {
+            id: "B".into(), providers: vec![], process_timeout_secs: 10, route_policy: None, max_retries: None,
+        });
+        let mut index = HashMap::new();
+        index.insert("A".into(), a);
+        index.insert("B".into(), b);
+
+        let edges = vec![
+            EdgeDef { from: a, to: b, event_type: EventType::Complete, exit_reason: None,
+                threshold: 1, strategy: Strategy::Any, },
+            EdgeDef { from: b, to: a, event_type: EventType::Complete, exit_reason: None,
+                threshold: 1, strategy: Strategy::Any, },
+        ];
+
+        let mut transfers = HashMap::new();
+        transfers.insert(a, NodeTransfer { from: a, out_edge_indices: vec![0] });
+        transfers.insert(b, NodeTransfer { from: b, out_edge_indices: vec![1] });
+
+        let params = HashMap::from([
+            (a, NodeParams { process_timeout_secs: 10 }),
+            (b, NodeParams { process_timeout_secs: 10 }),
+        ]);
+        let entries = vec![a];
+
+        GraphDef::from_components(graph, index, edges, transfers, params, entries)
+            .expect("directed cycle graph should be valid")
+    }
+
+    #[test]
+    fn test_directed_cycle_fires_multiple_rounds() {
+        // A → B → A (directed cycle). Without triggered, every Complete event
+        // from A fires A→B, and every Complete from B fires B→A.
+        let mut scheduler = Scheduler::new(build_directed_cycle_graph());
+        let a = scheduler.graph().node_index("A").expect("A should exist");
+        let b = scheduler.graph().node_index("B").expect("B should exist");
+
+        // Round 1: A → B
+        let r1 = scheduler.handle_event(a, EventType::Complete, None);
+        assert_eq!(r1.len(), 1, "A→B should fire in round 1");
+        assert_eq!(r1[0], b, "should target B");
+
+        // Round 2: B → A
+        let r2 = scheduler.handle_event(b, EventType::Complete, None);
+        assert_eq!(r2.len(), 1, "B→A should fire in round 2");
+        assert_eq!(r2[0], a, "should target A");
+
+        // Round 3: A → B again — no triggered gate, design philosophy.
+        let r3 = scheduler.handle_event(a, EventType::Complete, None);
+        assert_eq!(r3.len(), 1, "A→B should fire again in round 3 (no triggered gate — design philosophy)");
+        assert_eq!(r3[0], b, "should target B again");
+    }
+
+    // ── 18. Edge fires repeatedly for same node (no triggered gate — design philosophy) ──
+
+    #[test]
+    fn test_same_edge_fires_on_every_complete() {
+        // A → B (Any, Complete). Multiple completes from A should each
+        // trigger B — no triggered gate. This is intentional: h_e is stateless,
+        // every event independently evaluates all matching edges.
+        // See theory/DESIGN_PHILOSOPHY.md §三 (转移函数的不含时性).
+        let mut scheduler = Scheduler::new(build_chain_graph());
+        let a = scheduler.graph().node_index("A").expect("A should exist");
+        let b = scheduler.graph().node_index("B").expect("B should exist");
+
+        for i in 1..=5 {
+            let ready = scheduler.handle_event(a, EventType::Complete, None);
+            assert_eq!(ready.len(), 1, "event {i}: A→B should fire");
+            assert_eq!(ready[0], b, "should trigger B");
+        }
+    }
+
+    // ── 19. Fan-in All resets for next round ──
+
+    #[test]
+    fn test_fan_in_all_two_rounds() {
+        // A → C (All), B → C (All). Round 1: both complete → C ready.
+        // Round 2: both complete again → C ready again.
+        let mut scheduler = Scheduler::new(build_fan_in_graph());
+        let a = scheduler.graph().node_index("A").expect("A exists");
+        let b = scheduler.graph().node_index("B").expect("B exists");
+        let c = scheduler.graph().node_index("C").expect("C exists");
+
+        // Round 1
+        assert!(scheduler.handle_event(a, EventType::Complete, None).is_empty(), "A alone should not trigger C");
+        let r1b = scheduler.handle_event(b, EventType::Complete, None);
+        assert_eq!(r1b.len(), 1, "both A+B → C ready (round 1)");
+        assert_eq!(r1b[0], c, "C should be ready");
+        let _ = scheduler.dequeue_all();
+
+        // Round 2: same sequence, C should be ready again
+        assert!(scheduler.handle_event(a, EventType::Complete, None).is_empty(), "A alone should not trigger C (round 2)");
+        let r2b = scheduler.handle_event(b, EventType::Complete, None);
+        assert_eq!(r2b.len(), 1, "both A+B → C ready (round 2)");
+        assert_eq!(r2b[0], c, "C should be ready again");
     }
 }

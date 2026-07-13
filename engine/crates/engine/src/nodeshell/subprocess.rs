@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc;
 
-use super::types::{NodeChunk, NodeContext, NodeOutcome, SpawnError};
+use super::types::{exit_codes, NodeChunk, NodeContext, NodeOutcome, NodeOutput, SpawnError};
 
 /// Executes a node by spawning a subprocess.
 ///
@@ -14,38 +14,99 @@ use super::types::{NodeChunk, NodeContext, NodeOutcome, SpawnError};
 /// parse a simple command line. For complex quoting needs, pass the command
 /// through a wrapper script.
 ///
-/// # stdout line protocol
+/// # stdout protocol
 ///
-/// The subprocess can optionally use a streaming protocol for real-time events:
-///
-/// - `__nexus_log: <text>` — intermediate log (excluded from output)
-/// - `__nexus_exit_reason: <value>` — set exit_reason before exit
-/// - `__nexus_event: <text>` — structured output fragment (added to output)
-/// - `__nexus_log_end` — disable prefix checks for subsequent lines
-///
-/// Without any `__nexus_` prefix, all stdout lines are treated as output.
+/// The subprocess must emit a single JSON object on stdout with the shape
+/// `{"route":"...","content":"..."}` (the [`NodeOutput`] struct). The engine
+/// parses it after the process exits. If stdout is not valid JSON with a
+/// `route` field, execution fails with [`SpawnError`].
 #[derive(Debug, Clone)]
 pub struct SubprocessExecutor {
     /// The command to execute.
     command: String,
+    /// Whether this is a shell-wrapped command.
+    /// Shell commands are passed directly to `cmd.exe /c` / `sh -c`
+    /// without splitting, preserving quotes and shell syntax.
+    shell: bool,
 }
 
 impl SubprocessExecutor {
     /// Create a new subprocess executor for the given command string.
     #[must_use]
     pub fn new(command: String) -> Self {
-        Self { command }
+        Self { command, shell: false }
+    }
+
+    /// Create a shell-wrapped executor.
+    ///
+    /// The command is executed via `cmd /c` (Windows) or `sh -c` (Unix)
+    /// without argument splitting, enabling pipes, redirects, shell quoting,
+    /// and multi-word quoted arguments.
+    ///
+    /// # Security
+    ///
+    /// This function performs basic single-quote escaping on Unix. It does
+    /// NOT sanitise all shell metacharacters (backticks, `$()`, `&&`, etc.).
+    /// Do NOT pass untrusted input directly to the `command` parameter. If
+    /// the command includes user-supplied values, use the `Subprocess`
+    /// provider with explicit argument arrays instead.
+    #[must_use]
+    pub fn new_shell(command: String) -> Self {
+        Self { command, shell: true }
     }
 
     /// Split the command string into program and arguments.
-    fn split_command(command: &str) -> (&str, Vec<&str>) {
+    ///
+    /// Splits on unquoted whitespace. Content inside double quotes (`"`)
+    /// is treated as a single token (quotes are stripped).  Backslash-
+    /// escaped double quotes inside a quoted segment are supported.
+    ///
+    /// For complex shell expressions (pipes, redirects, nested quoting),
+    /// prefer the `Shell` provider which delegates to `sh -c` / `cmd /c`.
+    fn split_command(command: &str) -> (String, Vec<String>) {
         let trimmed = command.trim();
         if trimmed.is_empty() {
-            return ("", vec![]);
+            return (String::new(), vec![]);
         }
-        let mut parts = trimmed.split_whitespace();
-        let program = parts.next().unwrap_or("");
-        let args: Vec<&str> = parts.collect();
+        let mut tokens: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut chars = trimmed.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' if !in_quotes => {
+                    in_quotes = true;
+                }
+                '"' if in_quotes => {
+                    // Check for escaped quote: backslash before the closing quote
+                    if current.ends_with('\\') {
+                        current.pop(); // remove backslash
+                        current.push('"'); // keep literal quote
+                    } else {
+                        in_quotes = false;
+                    }
+                }
+                c if c.is_whitespace() && !in_quotes => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                c => {
+                    current.push(c);
+                }
+            }
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+
+        let program = tokens.first().cloned().unwrap_or_default();
+        let args = if tokens.len() > 1 {
+            tokens[1..].to_vec()
+        } else {
+            vec![]
+        };
         (program, args)
     }
 
@@ -61,6 +122,7 @@ impl SubprocessExecutor {
             let end = after_start.find("}}").unwrap_or(0);
             if end == 0 {
                 result.push_str(&rest[start..]);
+                rest = "";
                 break;
             }
             let key = &after_start[..end];
@@ -74,18 +136,63 @@ impl SubprocessExecutor {
         result
     }
 
-    /// Run the subprocess with streaming stdout/stderr.
+    /// Search upward from the executable's directory for a `scripts/`
+    /// directory, up to `max_levels` parent levels.
+    fn find_scripts_dir(max_levels: usize) -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let mut dir = exe.parent()?.to_path_buf();
+        for _ in 0..=max_levels {
+            let scripts = dir.join("scripts");
+            if scripts.exists() {
+                return Some(scripts);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Resolve `scripts/` paths to absolute paths relative to the executable.
     ///
-    /// Streams stdout/stderr lines in real time via `tracing` events while the
-    /// child is still running. This allows callers to observe intermediate
-    /// output (thinking, progress) before the process exits.
+    /// Searches upward from the exe directory for a `scripts/` directory,
+    /// supporting both `bin/nexus-cli.exe` (Windows) and `bin/linux/nexus-cli`
+    /// (Linux) release layouts.  When the command contains `scripts/xxx`, we
+    /// resolve it to `{release_root}/scripts/xxx` so the workflow author does
+    /// not need to know (or `cd` into) the release directory.
+    fn resolve_scripts_path(command: &str) -> String {
+        if !command.contains("scripts/") {
+            return command.to_string();
+        }
+
+        if let Some(scripts_dir) = Self::find_scripts_dir(3) {
+            let abs = scripts_dir.to_string_lossy().replace('\\', "/");
+            return command.replace("scripts/", &format!("{abs}/"));
+        }
+
+        // Fallback: leave as-is (CWD-relative, backward compatible).
+        command.to_string()
+    }
+
+    /// Run the subprocess, collect stdout as JSON, and return the parsed outcome.
     ///
     /// If the command contains `{{inputs.x}}` patterns, they are replaced with
     /// values from the node context's inputs map before spawning.
     ///
+    /// Any `scripts/` relative paths in the command are resolved against the
+    /// executable's sibling scripts directory, so workflows can reference
+    /// `python scripts/xxx.py` without depending on CWD.
+    ///
+    /// For shell-wrapped commands, the command is passed directly to the
+    /// shell without argument splitting, preserving quotes and shell syntax.
+    ///
+    /// The optional `chunk_tx` sender can be used to stream output lines
+    /// back to the caller as they are produced (not yet implemented).
+    ///
     /// # Errors
     ///
-    /// Returns [`SpawnError`] if the command cannot be spawned.
+    /// Returns [`SpawnError`] if the command cannot be spawned or if stdout is
+    /// not valid JSON with a `route` field.
     pub async fn run(
         &self,
         ctx: NodeContext,
@@ -100,16 +207,36 @@ impl SubprocessExecutor {
             self.command.clone()
         };
 
-        let (program, args) = Self::split_command(&command);
-        if program.is_empty() {
-            return Err(SpawnError {
-                message: "empty command".into(),
-            });
-        }
+        // Resolve `scripts/` paths relative to the executable binary so that
+        // `python scripts/xxx.py` works regardless of CWD.
+        let command = Self::resolve_scripts_path(&command);
 
-        let mut cmd = Command::new(program);
-        cmd.args(&args)
-            .stdin(std::process::Stdio::piped())
+        let mut cmd = if self.shell {
+            // Shell mode: pass the entire command directly to the shell.
+            // Do NOT split — the shell handles quoting, pipes, redirects, etc.
+            if cfg!(windows) {
+                let mut c = Command::new("cmd.exe");
+                c.arg("/c").arg(&command);
+                c
+            } else {
+                let mut c = Command::new("sh");
+                c.arg("-c").arg(&command);
+                c
+            }
+        } else {
+            // Direct subprocess mode: split the command into program + args.
+            let (program, args) = Self::split_command(&command);
+            if program.is_empty() {
+                return Err(SpawnError {
+                    message: "empty command".into(),
+                });
+            }
+            let mut c = Command::new(program);
+            c.args(&args);
+            c
+        };
+
+        cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
@@ -117,7 +244,7 @@ impl SubprocessExecutor {
             message: e.to_string(),
         })?;
 
-        // Write context JSON to stdin, then stdin drops → pipe closes → child sees EOF.
+        // Write context JSON to stdin, then stdin drops -> pipe closes -> child sees EOF.
         if let Some(mut stdin) = child.stdin.take() {
             let input = serde_json::to_string(&ctx).map_err(|e| SpawnError {
                 message: format!("serialize context: {e}"),
@@ -127,194 +254,124 @@ impl SubprocessExecutor {
             })?;
         }
 
-        // Stream stdout/stderr and wait concurrently.
-        stream_and_wait(child, timeout, node_id, chunk_tx).await
+        // Collect stdout, read stderr, and wait.
+        collect_and_wait(child, timeout, node_id, chunk_tx).await
     }
 }
 
-/// Stream stdout/stderr lines from a running child process, emit them in
-/// real time via tracing, then return the final `NodeOutcome`.
+/// Collect stdout from a running child process, parse it as JSON [`NodeOutput`],
+/// and return the final `NodeOutcome`.
 ///
-/// If `chunk_tx` is provided, each stdout line is also sent through the
-/// channel in real time (before the process exits).
+/// Stderr is read asynchronously and logged via `tracing::warn`.
 ///
-/// Uses `tokio::spawn` for the `wait()` future so that `child` is never
-/// mutably borrowed during the select loop (sidestepping the pinning
-/// conflict between `child.wait()` and `child.kill()`).
-fn process_line(
-    output_buf: &mut String,
-    text: &str,
-    log_mode: &mut bool,
-    exit_reason: &mut Option<String>,
-    chunk_tx: &Option<Sender<NodeChunk>>,
-    node_id: &str,
-) {
-    if *log_mode {
-        output_buf.push_str(text);
-        output_buf.push('\n');
-    } else if text == "__nexus_log_end" {
-        *log_mode = true;
-    } else if let Some(rest) = text.strip_prefix("__nexus_log:") {
-        tracing::info!(target: "nexus::node::log", node_id, log = rest.trim());
-    } else if let Some(rest) = text.strip_prefix("__nexus_exit_reason:") {
-        *exit_reason = Some(rest.trim().to_string());
-    } else if let Some(rest) = text.strip_prefix("__nexus_event:") {
-        let event_text = rest.trim();
-        if !event_text.is_empty() {
-            output_buf.push_str(event_text);
-            output_buf.push('\n');
-            tracing::info!(target: "nexus::node::event", node_id, event = event_text);
-        }
-    } else {
-        output_buf.push_str(text);
-        output_buf.push('\n');
-        if let Some(tx) = chunk_tx {
-            // Chunk channel full is safe — NodeOutcome.output has full content
-            let _ = tx.try_send(NodeChunk {
-                text: text.to_string(),
-                node_id: node_id.to_string(),
-            });
-        }
-    }
-}
-
-async fn stream_and_wait(
+/// If the child times out, it is killed and the partially-collected output is
+/// returned with `timed_out = true`.
+async fn collect_and_wait(
     mut child: Child,
     timeout: Duration,
     node_id: &str,
-    chunk_tx: Option<Sender<NodeChunk>>,
+    chunk_tx: Option<mpsc::Sender<NodeChunk>>,
 ) -> Result<NodeOutcome, SpawnError> {
     let out_pipe = child.stdout.take();
     let err_pipe = child.stderr.take();
 
-    let mut output_buf = String::new();
-    let mut exit_reason: Option<String> = None;
-    let mut exit_code: i32 = 0;
-    let mut timed_out = false;
-    let mut log_mode = false;
-    // Track whether the streaming protocol is active (reserved for future use).
-    let _stream_protocol = false;
+    // Spawn background reader for stdout.
+    let (stdout_tx, stdout_rx) = tokio::sync::oneshot::channel::<String>();
+    tokio::spawn(async move {
+        let mut output = String::new();
+        if let Some(pipe) = out_pipe {
+            let mut reader = tokio::io::BufReader::new(pipe);
+            let _ = tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut output).await;
+        }
+        let _ = stdout_tx.send(output);
+    });
 
-    // Spawn background line readers for stdout/stderr pipes.
-    let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel::<String>(1024);
-    let (stderr_tx, mut stderr_rx) = tokio::sync::mpsc::channel::<String>(1024);
-
-    if let Some(pipe) = out_pipe {
-        let tx = stdout_tx;
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(pipe).lines();
-            loop {
-                match lines.next_line().await {
-                    // Channel send failure: receiver dropped (task cancelled) — exit cleanly.
-                    Ok(Some(l)) => { let _ = tx.send(l).await; }
-                    _ => break,
+    // Spawn background reader for stderr — stream lines as chunks.
+    let (stderr_tx, stderr_rx) = tokio::sync::oneshot::channel::<String>();
+    tokio::spawn(async move {
+        let mut full = String::new();
+        if let Some(pipe) = err_pipe {
+            let reader = tokio::io::BufReader::new(pipe);
+            let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(ref tx) = chunk_tx {
+                    let _ = tx.send(NodeChunk { text: line.clone() }).await;
                 }
+                full.push_str(&line);
+                full.push('\n');
             }
-        });
-    }
-    if let Some(pipe) = err_pipe {
-        let tx = stderr_tx;
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(pipe).lines();
-            loop {
-                match lines.next_line().await {
-                    // Channel send failure: receiver dropped (task cancelled) — exit cleanly.
-                    Ok(Some(l)) => { let _ = tx.send(l).await; }
-                    _ => break,
-                }
-            }
-        });
-    }
+        }
+        let _ = stderr_tx.send(full);
+    });
 
-    // Also spawn wait() into a background task so we can select!
-    // between channel recv and exit notification in real time.
-    // (exit_code, timed_out)
-    let (exit_tx, mut exit_rx) = tokio::sync::oneshot::channel::<(i32, bool)>();
+    // Spawn wait() so we can kill from the timeout arm without borrow conflicts.
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<(i32, bool)>();
     tokio::spawn(async move {
         let waited = tokio::time::timeout(timeout, child.wait()).await;
         match waited {
-            // Oneshot send failure: receiver dropped (stream_and_wait already exited) — safe to ignore.
             Ok(Ok(s)) => { let _ = exit_tx.send((s.code().unwrap_or(-1), false)); }
-            // Oneshot send failure: receiver dropped (stream_and_wait already exited) — safe to ignore.
             Ok(Err(_)) => { let _ = exit_tx.send((-1, false)); }
             Err(_elapsed) => {
                 if let Err(e) = child.kill().await {
                     tracing::warn!(target: "nexus::node", "[NodeShell] failed to kill timed-out child: {e}");
                 }
-                // Oneshot send failure: receiver dropped (stream_and_wait already exited) — safe to ignore.
-                let _ = exit_tx.send((-1, true));
+                // -9 明确表示超时强杀，区别于 wait 失败等场景
+                let _ = exit_tx.send((-9, true));
             }
         }
     });
 
-    // Stream lines in real time until exit notification.
-    loop {
-        tokio::select! {
-            Some(text) = stdout_rx.recv() => {
-                process_line(
-                    &mut output_buf,
-                    &text,
-                    &mut log_mode,
-                    &mut exit_reason,
-                    &chunk_tx,
-                    node_id,
-                );
-            }
-            Some(text) = stderr_rx.recv() => {
-                tracing::warn!(target: "nexus::node::stderr", node_id, stderr = text);
-            }
-            result = &mut exit_rx => {
-                match result {
-                    Ok((c, t)) => { exit_code = c; timed_out = t; }
-                    Err(_) => {}
+    let (exit_code, _timed_out) = match exit_rx.await {
+        Ok(result) => result,
+        Err(_) => (exit_codes::WAIT_FAILED, false),
+    };
+
+    let stdout = match stdout_rx.await {
+        Ok(s) => s,
+        Err(_) => String::new(),
+    };
+    let stderr = match stderr_rx.await {
+        Ok(s) => s,
+        Err(_) => String::new(),
+    };
+
+    if !stderr.is_empty() {
+        tracing::warn!(target: "nexus::node::stderr", node_id, stderr = %stderr);
+    }
+
+    let output = if exit_code == exit_codes::TIMEOUT {
+        NodeOutput {
+            route: String::new(),
+            content: stdout,
+        }
+    } else {
+        match serde_json::from_str::<NodeOutput>(&stdout) {
+            Ok(node_output) => {
+                if node_output.route.is_empty() && !stdout.trim().is_empty() {
+                    return Err(SpawnError {
+                        message: "stdout is not valid JSON with 'route' field: missing route".into(),
+                    });
                 }
-                break;
+                node_output
+            }
+            Err(e) => {
+                return Err(SpawnError {
+                    message: format!("stdout is not valid JSON with 'route' field: {e}"),
+                });
             }
         }
-    }
+    };
 
-    // After exit signal, drain remaining lines efficiently.
-    // Uses a short sleep to avoid busy-waiting, allowing the
-    // line-reader task time to flush final lines.
-    for _ in 0..5 {
-        while let Ok(text) = stdout_rx.try_recv() {
-            process_line(
-                &mut output_buf,
-                &text,
-                &mut log_mode,
-                &mut exit_reason,
-                &chunk_tx,
-                node_id,
-            );
-        }
-        while let Ok(text) = stderr_rx.try_recv() {
-            tracing::warn!(target: "nexus::node::stderr", node_id, stderr = text);
-        }
-        tokio::time::sleep(Duration::from_micros(200)).await;
-    }
-    // Final drain
-    while let Ok(text) = stdout_rx.try_recv() {
-        process_line(
-            &mut output_buf,
-            &text,
-            &mut log_mode,
-            &mut exit_reason,
-            &chunk_tx,
-            node_id,
-        );
-    }
-    while let Ok(text) = stderr_rx.try_recv() {
-        tracing::warn!(target: "nexus::node::stderr", node_id, stderr = text);
-    }
-
-    if output_buf.ends_with('\n') {
-        output_buf.truncate(output_buf.len().saturating_sub(1));
-    }
+    // Use the route from NodeOutput as exit_reason for edge routing.
+    let exit_reason = if output.route.is_empty() {
+        None
+    } else {
+        Some(output.route.clone())
+    };
 
     Ok(NodeOutcome {
-        output: output_buf,
+        output,
         exit_code,
-        timed_out,
         exit_reason,
     })
 }
@@ -325,53 +382,88 @@ mod tests {
 
     use super::*;
 
+    /// Build a command that emits clean JSON on stdout, cross-platform.
+    /// Uses hex-encoding to avoid shell quoting issues — the entire Python
+    /// code contains no spaces so split_command works correctly.
+    fn json_cmd(json: &str) -> String {
+        let hex: String = json.bytes().map(|b| format!("{:02x}", b)).collect();
+        format!(
+            "python -c __import__('sys').stdout.write(bytes.fromhex('{hex}').decode())"
+        )
+    }
+
     #[tokio::test]
     async fn test_echo_subprocess() {
         let cmd = if cfg!(windows) { "cmd.exe /c echo hello" } else { "echo hello" };
         let executor = SubprocessExecutor::new(cmd.to_string());
-        let ctx = NodeContext {
-            inputs: HashMap::new(),
-            extensions: HashMap::new(),
-        };
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
         let outcome = executor.run(ctx, Duration::from_secs(5), "echo", None).await;
-        assert!(outcome.is_ok(), "echo should succeed: {:?}", outcome);
-        let outcome = outcome.unwrap();
+        // echo outputs plain text - JSON parse should fail.
+        assert!(outcome.is_err(), "echo without JSON should fail: {:?}", outcome);
+    }
+
+    #[tokio::test]
+    async fn test_json_output_parsed() {
+        let json = r#"{"route":"result","content":"hello world"}"#;
+        let executor = SubprocessExecutor::new(json_cmd(json));
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
+        let outcome = executor.run(ctx, Duration::from_secs(5), "json_test", None).await
+            .expect("valid JSON with route should succeed");
+        assert_eq!(outcome.output.route, "result");
+        assert_eq!(outcome.output.content, "hello world");
         assert_eq!(outcome.exit_code, 0);
-        assert!(!outcome.timed_out);
+        assert!(!outcome.timed_out());
     }
 
     #[tokio::test]
-    async fn test_exit_reason_extraction() {
-        let cmd = if cfg!(windows) {
-            "cmd.exe /c echo __nexus_exit_reason: approved && echo data_line_2".to_string()
-        } else {
-            "sh -c \"echo __nexus_exit_reason: approved && echo data_line_2\"".to_string()
-        };
-        let executor =
-            SubprocessExecutor::new(cmd);
-        let ctx = NodeContext {
-            inputs: HashMap::new(),
-            extensions: HashMap::new(),
-        };
-        let outcome = executor.run(ctx, Duration::from_secs(5), "exit_reason_test", None).await
-            .expect("cmd should succeed");
-        assert!(outcome.output.contains("data_line_2"));
+    async fn test_json_output_without_route_fails() {
+        let json = r#"{"content":"no route here"}"#;
+        let executor = SubprocessExecutor::new(json_cmd(json));
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
+        let result = executor.run(ctx, Duration::from_secs(5), "no_route", None).await;
+        assert!(result.is_err(), "JSON without route should fail");
+        let err = result.unwrap_err();
+        assert!(err.message.contains("route"), "error should mention route");
     }
 
     #[tokio::test]
-    async fn test_timeout() {
+    async fn test_plain_text_output_fails() {
+        let cmd = if cfg!(windows) { "cmd.exe /c echo just plain text" } else { "echo just plain text" };
+        let executor = SubprocessExecutor::new(cmd.to_string());
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
+        let result = executor.run(ctx, Duration::from_secs(5), "plain_text", None).await;
+        assert!(result.is_err(), "plain text should fail");
+    }
+
+    #[tokio::test]
+    async fn test_json_output_with_content_only() {
+        let json = r#"{"route":"event"}"#;
+        let executor = SubprocessExecutor::new(json_cmd(json));
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
+        let outcome = executor.run(ctx, Duration::from_secs(5), "content_only", None).await
+            .expect("JSON with route only should succeed");
+        assert_eq!(outcome.output.route, "event");
+        assert_eq!(outcome.output.content, "", "content should default to empty");
+    }
+
+    #[tokio::test]
+    async fn test_timeout_returns_partial_output() {
         let executor = SubprocessExecutor::new("ping -n 60 127.0.0.1".into());
-        let ctx = NodeContext {
-            inputs: HashMap::new(),
-            extensions: HashMap::new(),
-        };
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
         let result = executor.run(ctx, Duration::from_millis(10), "timeout_test", None).await;
         match result {
             Ok(outcome) => {
-                assert!(outcome.timed_out, "should timeout with 10ms timeout");
+        assert!(outcome.timed_out(), "should timeout with 10ms timeout");
+        assert!(outcome.exit_code != 0 || outcome.timed_out());
             }
             Err(_) => {
-                // Spawn might fail on some systems — that's ok
+                // Spawn might fail on some systems -- that's ok
             }
         }
     }
@@ -379,10 +471,8 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_failure() {
         let executor = SubprocessExecutor::new("nonexistent_command_12345".into());
-        let ctx = NodeContext {
-            inputs: HashMap::new(),
-            extensions: HashMap::new(),
-        };
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
         let result = executor.run(ctx, Duration::from_secs(1), "spawn_fail", None).await;
         assert!(result.is_err(), "nonexistent command should return SpawnError");
     }
@@ -390,10 +480,8 @@ mod tests {
     #[tokio::test]
     async fn test_empty_command() {
         let executor = SubprocessExecutor::new(String::new());
-        let ctx = NodeContext {
-            inputs: HashMap::new(),
-            extensions: HashMap::new(),
-        };
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
         let result = executor.run(ctx, Duration::from_secs(1), "empty_cmd", None).await;
         assert!(result.is_err(), "empty command should return SpawnError");
     }
@@ -420,29 +508,11 @@ mod tests {
         assert_eq!(result, "echo ", "missing key should be replaced with empty string");
     }
 
-    #[tokio::test]
-    async fn test_stream_event_extraction() {
-        let cmd = if cfg!(windows) {
-            "cmd.exe /c echo __nexus_event: result_fragment && echo __nexus_exit_reason: done".to_string()
-        } else {
-            "sh -c \"echo __nexus_event: result_fragment && echo __nexus_exit_reason: done\"".to_string()
-        };
-        let executor = SubprocessExecutor::new(cmd);
-        let ctx = NodeContext {
-            inputs: HashMap::new(),
-            extensions: HashMap::new(),
-        };
-        let outcome = executor.run(ctx, Duration::from_secs(5), "stream_test", None).await
-            .expect("cmd should succeed");
-        assert!(outcome.output.contains("result_fragment"));
-        assert_eq!(outcome.exit_reason, Some("done".into()));
-    }
-
     #[test]
     fn test_split_command_whitespace() {
         let (prog, args) = SubprocessExecutor::split_command("echo hello");
         assert_eq!(prog, "echo");
-        assert_eq!(args, vec!["hello"]);
+        assert_eq!(args, vec!["hello".to_string()]);
     }
 
     #[test]
@@ -457,5 +527,36 @@ mod tests {
         let (prog, args) = SubprocessExecutor::split_command("");
         assert_eq!(prog, "");
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_split_command_quoted_args() {
+        let (prog, args) =
+            SubprocessExecutor::split_command(r#"python "script with spaces.py" --flag"#);
+        assert_eq!(prog, "python");
+        assert_eq!(args, vec!["script with spaces.py".to_string(), "--flag".to_string()]);
+    }
+
+    #[test]
+    fn test_split_command_escaped_quote() {
+        let (prog, args) =
+            SubprocessExecutor::split_command(r#"echo "he said \"hello\"""#);
+        assert_eq!(prog, "echo");
+        assert_eq!(args, vec![r#"he said "hello""#.to_string()]);
+    }
+
+    #[test]
+    fn test_split_command_mixed_quoted_unquoted() {
+        let (prog, args) =
+            SubprocessExecutor::split_command(r#"cmd --input "data file.txt" --verbose"#);
+        assert_eq!(prog, "cmd");
+        assert_eq!(
+            args,
+            vec![
+                "--input".to_string(),
+                "data file.txt".to_string(),
+                "--verbose".to_string(),
+            ]
+        );
     }
 }

@@ -42,9 +42,9 @@ td { font-size: 13px; }
 .badge-Failed, .badge-failed { background: var(--red); }
 .badge-TimedOut { background: var(--amber); color: #000; }
 .row { display: flex; gap: 16px; }
-.col { flex: 1; }
-.dag-container { width: 100%; min-height: 420px; border: 1px solid var(--border);
-  border-radius: 8px; background: var(--bg); }
+.col { flex: 1; min-width: 0; }
+.dag-container { width: 100%; height: 450px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg); position: relative; overflow: hidden; }
 .log-panel { height: 300px; overflow-y: auto; font: 12px/1.6 'Cascadia Code','Fira Code',monospace;
   background: #0a0f19; border-radius: 8px; padding: 12px; }
 .log-line { padding: 1px 0; }

@@ -2,14 +2,17 @@
 //!
 //! A [`EngineSnapshot`] is a point-in-time view of the engine's runtime state,
 //! constructed from the [`Scheduler`]'s public API and caller-provided
-//! metadata (running count, start instant).  It does NOT mutate or lock
-//! any engine state.
+//! metadata (start instant).  It does NOT mutate or lock any engine state.
 //!
 //! # Design
 //!
 //! The snapshot types mirror the internal runtime types intentionally:
 //! they are decoupled so that diagnostics can evolve independently
 //! without bloating engine structs with display concerns.
+//!
+//! `running_count` is derived from the scheduler's node states at capture time
+//! rather than stored as a separate field — it counts how many nodes currently
+//! have `NodeStatus::Running`.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -36,10 +39,19 @@ pub struct NodeSnapshot {
 pub struct EngineSnapshot {
     /// Nodes, keyed by node_id (workflow-definition ID).
     pub nodes: HashMap<String, NodeSnapshot>,
-    /// Number of nodes currently executing.
-    pub running_count: usize,
     /// Wall-clock time since the engine started.
     pub elapsed: Duration,
+}
+
+impl EngineSnapshot {
+    /// Number of nodes currently executing (derived from node states at capture).
+    #[must_use]
+    pub fn running_count(&self) -> usize {
+        self.nodes
+            .values()
+            .filter(|n| n.status == crate::graph::scheduler::NodeStatus::Running)
+            .count()
+    }
 }
 
 impl EngineSnapshot {
@@ -47,10 +59,10 @@ impl EngineSnapshot {
     ///
     /// The snapshot is derived from the scheduler's public state API;
     /// no locks are acquired and no side effects are produced.
+    /// `running_count` is derived from node states — no parameter needed.
     #[must_use]
     pub fn capture(
         scheduler: &Scheduler,
-        running_count: usize,
         started_at: Instant,
     ) -> Self {
         let mut nodes: HashMap<String, NodeSnapshot> = HashMap::new();
@@ -104,7 +116,6 @@ impl EngineSnapshot {
 
         Self {
             nodes,
-            running_count,
             elapsed: started_at.elapsed(),
         }
     }
@@ -114,7 +125,7 @@ impl EngineSnapshot {
 impl std::fmt::Display for EngineSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "=== Engine Snapshot (elapsed: {:?}) ===", self.elapsed)?;
-        writeln!(f, "  running_count: {}", self.running_count)?;
+        writeln!(f, "  running_count: {}", self.running_count())?;
         writeln!(f, "  nodes:")?;
 
         let mut sorted_ids: Vec<_> = self.nodes.keys().collect();
@@ -155,11 +166,13 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
 
         let mut index = HashMap::new();
@@ -195,19 +208,19 @@ mod tests {
             .checked_sub(Duration::from_secs(5))
             .unwrap();
 
-        let snapshot = EngineSnapshot::capture(&scheduler, 1, started_at);
+        let snapshot = EngineSnapshot::capture(&scheduler, started_at);
 
         assert_eq!(snapshot.nodes.len(), 2);
         assert!(snapshot.nodes.contains_key("A"));
         assert!(snapshot.nodes.contains_key("B"));
-        assert_eq!(snapshot.running_count, 1);
+        assert_eq!(snapshot.running_count(), 0);
         assert!(snapshot.elapsed >= Duration::from_secs(5));
     }
 
     #[test]
     fn test_snapshot_display() {
         let scheduler = Scheduler::new(build_chain_graph_def());
-        let snapshot = EngineSnapshot::capture(&scheduler, 0, Instant::now());
+        let snapshot = EngineSnapshot::capture(&scheduler, Instant::now());
         let display = snapshot.to_string();
         assert!(display.contains("Engine Snapshot"));
         assert!(display.contains("A"));

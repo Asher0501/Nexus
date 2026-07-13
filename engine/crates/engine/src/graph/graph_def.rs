@@ -4,15 +4,21 @@
 //! work (scheduling, routing, execution) derives from. It is constructed via
 //! [`GraphDef::from_components`] which verifies five structural invariants
 //! before returning an instance.
+//!
+//! [`NodeTransfer`] implements the local closure theorem's f_v: State_v → 2^V
+//! through its [`NodeTransfer::evaluate`] method — making the transfer function
+//! a named, callable entity instead of inline logic in [`Scheduler`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableDiGraph;
 
-use crate::graph::edge::EdgeDef;
+use crate::graph::edge::{EdgeDef, EdgeState, Strategy};
 use crate::model::error::ValidationError;
+use crate::model::predecessor::EventType;
 use crate::model::provider::ProviderDef;
+use crate::model::workflow::RoutePolicyDef;
 
 /// Data associated with each node in the graph.
 #[derive(Debug, Clone)]
@@ -23,6 +29,10 @@ pub struct NodeData {
     pub providers: Vec<ProviderDef>,
     /// Maximum execution time in seconds.
     pub process_timeout_secs: u64,
+    /// Route policy for this node (None = no override).
+    pub route_policy: Option<RoutePolicyDef>,
+    /// Per-node max retries on failure (None = inherit global default).
+    pub max_retries: Option<u64>,
 }
 
 /// Execution parameters for a node.
@@ -36,12 +46,109 @@ pub struct NodeParams {
 ///
 /// Corresponds to the local closure theorem's f_v: State_v → 2^V.
 /// Each node has exactly one `NodeTransfer`, aggregating all outgoing edges.
+///
+/// The [`evaluate`](NodeTransfer::evaluate) method makes the transfer function
+/// a named, callable entity — instead of inline logic in [`Scheduler`].
 #[derive(Debug, Clone)]
 pub struct NodeTransfer {
     /// The node this transfer belongs to.
     pub from: NodeIndex,
     /// Indices into [`GraphDef::edges`] for this node's outgoing edges.
     pub out_edge_indices: Vec<usize>,
+}
+
+impl NodeTransfer {
+    /// Evaluate f_v: State_v → 2^V.
+    ///
+    /// Implements the local closure theorem's transfer function for this node.
+    /// For each outgoing edge e = (v, w, h_e, g_e) where v is `self.from`:
+    ///
+    /// 1. **h_e** — branch matching: event type match, exit_reason filter, threshold counter
+    /// 2. **g_e** — strategy aggregation: `Any` enqueues immediately; `All` waits for
+    ///    all upstream nodes via `fan_in_pending`, then resets for the next round
+    ///
+    /// This is a **pure function** with respect to node state — it reads `edges` and
+    /// `edge_states`, mutates `edge_states` (threshold counters), `fan_in_pending`,
+    /// and `ready_queue`, and returns the set of downstream nodes to enqueue.
+    /// It does NOT modify the calling node's status, result, or event counters.
+    #[must_use]
+    pub fn evaluate(
+        &self,
+        edges: &[EdgeDef],
+        edge_states: &mut [EdgeState],
+        event: EventType,
+        exit_reason: Option<&str>,
+        fan_in_pending: &mut HashMap<NodeIndex, usize>,
+        ready_queue: &mut VecDeque<NodeIndex>,
+    ) -> Vec<NodeIndex> {
+        let mut ready: Vec<NodeIndex> = Vec::new();
+
+        for &edge_idx in &self.out_edge_indices {
+            let edge: &EdgeDef = &edges[edge_idx];
+            let es: &mut EdgeState = &mut edge_states[edge_idx];
+
+            // ════════════════════════════════════════════
+            // h_e: 分支匹配函数
+            // 纯函数判定——不记忆、无 triggered
+            // ════════════════════════════════════════════
+
+            // (a) 事件类型匹配
+            if edge.event_type != event {
+                continue;
+            }
+
+            // (b) exit_reason 匹配
+            if let Some(ref expected_reason) = edge.exit_reason {
+                match exit_reason {
+                    Some(actual) if actual == expected_reason.as_str() => {}
+                    _ => continue,
+                }
+            }
+
+            // (c) 阈值计数器递增 + 判定
+            es.event_count += 1;
+            if es.event_count < edge.threshold {
+                continue;
+            }
+
+            // ════════════════════════════════════════════
+            // g_e: 策略聚合函数
+            // Any → 直接入队; All → fan_in_pending 归零后入队
+            // ════════════════════════════════════════════
+
+            match edge.strategy {
+                Strategy::Any => {
+                    ready_queue.push_back(edge.to);
+                    ready.push(edge.to);
+                }
+                Strategy::All => {
+                    if let Some(pending) = fan_in_pending.get_mut(&edge.to) {
+                        if *pending > 0 {
+                            *pending -= 1;
+                        }
+                    }
+                    let all_ready = fan_in_pending
+                        .get(&edge.to)
+                        .map(|&p| p == 0)
+                        .unwrap_or(true);
+                    if all_ready {
+                        ready_queue.push_back(edge.to);
+                        ready.push(edge.to);
+                        // 重置 fan_in_pending—下一轮的 g_e 重新计数
+                        if let Some(pending) = fan_in_pending.get_mut(&edge.to) {
+                            let all_count = edges
+                                .iter()
+                                .filter(|e| e.to == edge.to && e.strategy == Strategy::All)
+                                .count();
+                            *pending = all_count;
+                        }
+                    }
+                }
+            }
+        }
+
+        ready
+    }
 }
 
 /// A verified, aggregated graph definition.
@@ -233,7 +340,7 @@ impl GraphDef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     use crate::graph::edge::Strategy;
     use crate::model::predecessor::EventType;
@@ -253,13 +360,14 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
-
         let mut index = HashMap::new();
         index.insert("A".into(), a);
         index.insert("B".into(), b);
@@ -320,6 +428,7 @@ mod tests {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
+            route_policy: None, max_retries: None,
         });
         let mut p2 = p.clone();
         p2.insert(node_c, NodeParams {
@@ -490,5 +599,265 @@ mod tests {
 
         let edges = def.edges();
         assert_eq!(edges.len(), 1);
+    }
+
+    // ── NodeTransfer::evaluate tests ──────────────────────
+
+    /// Build a simple chain: A → B (All, Complete, threshold=1).
+    fn chain_transfer() -> (NodeTransfer, Vec<EdgeDef>, Vec<EdgeState>) {
+        let a = NodeIndex::new(0);
+        let b = NodeIndex::new(1);
+        let transfer = NodeTransfer {
+            from: a,
+            out_edge_indices: vec![0],
+        };
+        let edges = vec![EdgeDef {
+            from: a,
+            to: b,
+            event_type: EventType::Complete,
+            exit_reason: None,
+            threshold: 1,
+            strategy: Strategy::All,
+        }];
+        let edge_states = vec![EdgeState::default()];
+        (transfer, edges, edge_states)
+    }
+
+    #[test]
+    fn test_transfer_evaluate_chain() {
+        let (transfer, edges, mut edge_states) = chain_transfer();
+        let b = NodeIndex::new(1);
+        let mut fan_in_pending: HashMap<NodeIndex, usize> = HashMap::new();
+        let mut ready_queue: VecDeque<NodeIndex> = VecDeque::new();
+
+        let ready = transfer.evaluate(
+            &edges,
+            &mut edge_states,
+            EventType::Complete,
+            None,
+            &mut fan_in_pending,
+            &mut ready_queue,
+        );
+
+        assert_eq!(ready.len(), 1, "chain: A Complete should trigger B");
+        assert_eq!(ready[0], b, "chain: should target B");
+        assert_eq!(edge_states[0].event_count, 1, "chain: event_count should be 1");
+    }
+
+    #[test]
+    fn test_transfer_evaluate_event_mismatch() {
+        let (transfer, edges, mut edge_states) = chain_transfer();
+        let mut fan_in_pending: HashMap<NodeIndex, usize> = HashMap::new();
+        let mut ready_queue: VecDeque<NodeIndex> = VecDeque::new();
+
+        // Edge expects Complete, send Failed — no trigger.
+        let ready = transfer.evaluate(
+            &edges,
+            &mut edge_states,
+            EventType::Failed,
+            None,
+            &mut fan_in_pending,
+            &mut ready_queue,
+        );
+
+        assert!(ready.is_empty(), "Failed event should not trigger Complete edge");
+        assert_eq!(edge_states[0].event_count, 0, "no match → no event_count increment");
+    }
+
+    #[test]
+    fn test_transfer_evaluate_exit_reason_filter() {
+        let a = NodeIndex::new(0);
+        let b = NodeIndex::new(1);
+        let transfer = NodeTransfer {
+            from: a,
+            out_edge_indices: vec![0],
+        };
+        let edges = vec![EdgeDef {
+            from: a,
+            to: b,
+            event_type: EventType::Complete,
+            exit_reason: Some("ok".into()),
+            threshold: 1,
+            strategy: Strategy::All,
+        }];
+        let mut edge_states = vec![EdgeState::default()];
+        let mut fan_in_pending: HashMap<NodeIndex, usize> = HashMap::new();
+        let mut ready_queue: VecDeque<NodeIndex> = VecDeque::new();
+
+        // Wrong exit_reason → no trigger.
+        let r1 = transfer.evaluate(
+            &edges, &mut edge_states,
+            EventType::Complete, Some("wrong"),
+            &mut fan_in_pending, &mut ready_queue,
+        );
+        assert!(r1.is_empty(), "wrong exit_reason should not trigger");
+
+        // Correct exit_reason → trigger.
+        let mut edge_states2 = vec![EdgeState::default()];
+        let mut ready_queue2: VecDeque<NodeIndex> = VecDeque::new();
+        let r2 = transfer.evaluate(
+            &edges, &mut edge_states2,
+            EventType::Complete, Some("ok"),
+            &mut fan_in_pending, &mut ready_queue2,
+        );
+        assert_eq!(r2.len(), 1, "correct exit_reason should trigger");
+        assert_eq!(r2[0], b);
+    }
+
+    #[test]
+    fn test_transfer_evaluate_threshold() {
+        let a = NodeIndex::new(0);
+        let b = NodeIndex::new(1);
+        // threshold=3: need 3 events before triggering.
+        let transfer = NodeTransfer {
+            from: a,
+            out_edge_indices: vec![0],
+        };
+        let edges = vec![EdgeDef {
+            from: a, to: b, event_type: EventType::Complete,
+            exit_reason: None, threshold: 3, strategy: Strategy::Any,
+        }];
+        let mut fan_in_pending: HashMap<NodeIndex, usize> = HashMap::new();
+
+        // First two events → no trigger.
+        let mut es1 = vec![EdgeState::default()];
+        let mut rq1: VecDeque<NodeIndex> = VecDeque::new();
+        let r1 = transfer.evaluate(
+            &edges, &mut es1, EventType::Complete, None,
+            &mut fan_in_pending, &mut rq1,
+        );
+        assert!(r1.is_empty(), "2 of 3 should not trigger");
+        assert_eq!(es1[0].event_count, 1, "first event counted");
+
+        let mut es2 = vec![EdgeState { event_count: 1 }];
+        let mut rq2: VecDeque<NodeIndex> = VecDeque::new();
+        let r2 = transfer.evaluate(
+            &edges, &mut es2, EventType::Complete, None,
+            &mut fan_in_pending, &mut rq2,
+        );
+        assert!(r2.is_empty(), "2 of 3 should not trigger");
+        assert_eq!(es2[0].event_count, 2);
+
+        // Third event → trigger.
+        let mut es3 = vec![EdgeState { event_count: 2 }];
+        let mut rq3: VecDeque<NodeIndex> = VecDeque::new();
+        let r3 = transfer.evaluate(
+            &edges, &mut es3, EventType::Complete, None,
+            &mut fan_in_pending, &mut rq3,
+        );
+        assert_eq!(r3.len(), 1, "3rd event should trigger threshold=3");
+        assert_eq!(r3[0], b);
+    }
+
+    #[test]
+    fn test_transfer_evaluate_fan_in_all() {
+        let a = NodeIndex::new(0);
+        let b = NodeIndex::new(1);
+        let c = NodeIndex::new(2);
+
+        // A → C (All), B → C (All)
+        let transfer_a = NodeTransfer { from: a, out_edge_indices: vec![0] };
+        let transfer_b = NodeTransfer { from: b, out_edge_indices: vec![1] };
+
+        let edges = vec![
+            EdgeDef { from: a, to: c, event_type: EventType::Complete, exit_reason: None, threshold: 1, strategy: Strategy::All },
+            EdgeDef { from: b, to: c, event_type: EventType::Complete, exit_reason: None, threshold: 1, strategy: Strategy::All },
+        ];
+
+        let mut fan_in_pending: HashMap<NodeIndex, usize> = HashMap::new();
+        fan_in_pending.insert(c, 2); // 2 All edges → C
+
+        // A completes → still need B.
+        let mut edge_states = vec![EdgeState::default(), EdgeState::default()];
+        let mut ready_queue: VecDeque<NodeIndex> = VecDeque::new();
+        let r1 = transfer_a.evaluate(
+            &edges, &mut edge_states, EventType::Complete, None,
+            &mut fan_in_pending, &mut ready_queue,
+        );
+        assert!(r1.is_empty(), "A alone should not trigger C with All");
+        assert_eq!(fan_in_pending[&c], 1, "fan_in_pending[C] should drop to 1");
+
+        // B completes → C is now ready.
+        let r2 = transfer_b.evaluate(
+            &edges, &mut edge_states, EventType::Complete, None,
+            &mut fan_in_pending, &mut ready_queue,
+        );
+        assert_eq!(r2.len(), 1, "both complete → C ready");
+        assert_eq!(r2[0], c, "C should be ready");
+        // fan_in_pending resets to 2 for next round.
+        assert_eq!(fan_in_pending[&c], 2, "fan_in_pending[C] reset to 2");
+        // Each transfer pushes to ready_queue when its All condition triggers.
+        // A's evaluate returned empty (pending still 1).
+        // B's evaluate triggered (pending 0) and pushed C.
+        assert_eq!(ready_queue.len(), 1, "C pushed to ready_queue once (B's evaluate)");
+    }
+
+    #[test]
+    fn test_transfer_evaluate_fan_out() {
+        let a = NodeIndex::new(0);
+        let b = NodeIndex::new(1);
+        let c = NodeIndex::new(2);
+
+        // A → B (Any), A → C (Any) — fan-out.
+        let transfer = NodeTransfer { from: a, out_edge_indices: vec![0, 1] };
+        let edges = vec![
+            EdgeDef { from: a, to: b, event_type: EventType::Complete, exit_reason: None, threshold: 1, strategy: Strategy::Any },
+            EdgeDef { from: a, to: c, event_type: EventType::Complete, exit_reason: None, threshold: 1, strategy: Strategy::Any },
+        ];
+
+        let mut edge_states = vec![EdgeState::default(), EdgeState::default()];
+        let mut fan_in_pending: HashMap<NodeIndex, usize> = HashMap::new();
+        let mut ready_queue: VecDeque<NodeIndex> = VecDeque::new();
+
+        let ready = transfer.evaluate(
+            &edges, &mut edge_states, EventType::Complete, None,
+            &mut fan_in_pending, &mut ready_queue,
+        );
+        assert_eq!(ready.len(), 2, "fan-out should trigger both B and C");
+        assert!(ready.contains(&b), "B should be in ready set");
+        assert!(ready.contains(&c), "C should be in ready set");
+        assert_eq!(ready_queue.len(), 2, "ready_queue should have both B and C");
+    }
+
+    #[test]
+    fn test_transfer_evaluate_cycle_fires_repeatedly() {
+        let a = NodeIndex::new(0);
+        let b = NodeIndex::new(1);
+
+        // A → B (Any), B → A (Any) — directed cycle.
+        let transfer_a = NodeTransfer { from: a, out_edge_indices: vec![0] };
+        let transfer_b = NodeTransfer { from: b, out_edge_indices: vec![1] };
+        let edges = vec![
+            EdgeDef { from: a, to: b, event_type: EventType::Complete, exit_reason: None, threshold: 1, strategy: Strategy::Any },
+            EdgeDef { from: b, to: a, event_type: EventType::Complete, exit_reason: None, threshold: 1, strategy: Strategy::Any },
+        ];
+
+        let mut edge_states = vec![EdgeState::default(), EdgeState::default()];
+        let mut fan_in_pending: HashMap<NodeIndex, usize> = HashMap::new();
+        let mut ready_queue: VecDeque<NodeIndex> = VecDeque::new();
+
+        // Round 1: A → B
+        let r1 = transfer_a.evaluate(
+            &edges, &mut edge_states, EventType::Complete, None,
+            &mut fan_in_pending, &mut ready_queue,
+        );
+        assert_eq!(r1.len(), 1, "A→B round 1");
+        assert_eq!(r1[0], b);
+
+        // Round 2: B → A (no triggered gate)
+        let r2 = transfer_b.evaluate(
+            &edges, &mut edge_states, EventType::Complete, None,
+            &mut fan_in_pending, &mut ready_queue,
+        );
+        assert_eq!(r2.len(), 1, "B→A round 2");
+        assert_eq!(r2[0], a);
+
+        // Round 3: A → B again (no triggered gate)
+        let r3 = transfer_a.evaluate(
+            &edges, &mut edge_states, EventType::Complete, None,
+            &mut fan_in_pending, &mut ready_queue,
+        );
+        assert_eq!(r3.len(), 1, "A→B round 3 (no triggered gate — design philosophy)");
+        assert_eq!(r3[0], b);
     }
 }

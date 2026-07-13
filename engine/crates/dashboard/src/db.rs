@@ -113,9 +113,10 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a workflow by `id`.
+    /// Delete a workflow by `id` and all of its associated runs.
     pub fn delete_workflow(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute("DELETE FROM runs WHERE workflow_id = ?", params![id])?;
         conn.execute("DELETE FROM workflows WHERE id = ?", params![id])?;
         Ok(())
     }

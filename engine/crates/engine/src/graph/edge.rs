@@ -1,63 +1,62 @@
 //! Edge definition types for the graph module.
 //!
-//! This module provides [`EdgeDef`] (pure data, runtime read-only), [`EdgeState`]
-//! (runtime mutable state tracked by the scheduler), and [`Strategy`] (trigger
-//! combination logic).
+//! Each edge is a pair of two orthogonal functions: h_e (branch matching)
+//! and g_e (strategy aggregation). See theory/NODE_TRANSFER.md for the
+//! complete design philosophy.
+//!
+//! - [`EdgeDef`]: pure data, runtime read-only — defines the parameters of
+//!   h_e (event_type, exit_reason, threshold) and g_e (strategy).
+//! - [`EdgeState`]: runtime mutable state — tracks h_e's threshold counter
+//!   (event_count). No triggered state — h_e is a pure function.
 
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
 
 use crate::model::predecessor::EventType;
 
-/// Trigger strategy for an edge.
+/// g_e strategy: how to aggregate multiple source-node readiness signals.
 ///
-/// Determines when an edge should be evaluated:
-/// - `All`: All from-nodes must signal before the event is counted.
-/// - `Any`: Any single from-node signal suffices.
+/// Corresponds to the g_e function in the h+g decomposition:
+/// - `Any` (∨): single source ready → trigger downstream.
+/// - `All` (∧): all sources ready → trigger downstream.
 ///
-/// With single-`from` edges, `All` applies to the edge's `threshold` counter
-/// (multiple events from the same source), while fan-in convergence is handled
-/// by the engine via `StagingArea`.
+/// All/Any are complete (see DESIGN_PHILOSOPHY.md §〇 推论 3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Strategy {
-    /// All from-nodes must participate before counting.
+    /// All source nodes must signal readiness before the edge fires.
     All,
-    /// Any single from-node signal is sufficient.
+    /// Any single source node signal is sufficient.
     Any,
 }
 
-/// Edge definition — pure data, runtime read-only.
+/// h_e parameters + g_e strategy — pure data, runtime read-only.
 ///
-/// Represents a directed trigger edge in the graph. When a node emits an event
-/// matching this edge's criteria and the strategy/threshold conditions are met,
-/// the target node (`to`) is enqueued for execution.
+/// Represents a directed trigger edge e = (from, to, h_e, g_e).
+/// - h_e: branch matching (event_type, exit_reason, threshold)
+/// - g_e: strategy aggregation (strategy)
 #[derive(Debug, Clone)]
 pub struct EdgeDef {
-    /// Source node index whose events drive this edge (single source).
+    /// Source node index (`v ∈ V`).
     pub from: NodeIndex,
-    /// Target node index (the node triggered by this edge).
+    /// Target node index (`w ∈ V`).
     pub to: NodeIndex,
-    /// Event type that this edge responds to.
+    /// h_e: event type that this edge responds to.
     pub event_type: EventType,
-    /// Optional `exit_reason` filter. When `Some`, only events whose reason
-    /// matches this string are accepted.
+    /// h_e: optional exit_reason filter (exact string match).
     pub exit_reason: Option<String>,
-    /// Number of matching events required before the edge fires.
+    /// h_e: threshold — number of matching events required before the edge fires.
     pub threshold: u64,
-    /// How events are combined.
+    /// g_e: strategy — Any (∨) or All (∧).
     pub strategy: Strategy,
 }
 
-/// Edge runtime state — mutated by the scheduler during graph execution.
+/// Edge runtime state — h_e's threshold counter only.
 ///
-/// Tracks whether this edge has already fired and how many matching events
-/// have been received. With single-`from` edges, multi-source convergence is
-/// handled at the engine level (multiple edges sharing the same `to`).
+/// No triggered state — h_e is a pure function. Every event independently
+/// evaluates all matching edges. See theory/NODE_TRANSFER.md.
 #[derive(Debug, Clone, Default)]
 pub struct EdgeState {
-    /// Whether this edge has already fired.
-    pub triggered: bool,
-    /// Number of matching events received so far.
+    /// h_e: number of matching events received so far (for threshold).
     pub event_count: u64,
 }
 
@@ -70,7 +69,6 @@ mod tests {
     #[test]
     fn test_edge_state_defaults() {
         let state = EdgeState::default();
-        assert!(!state.triggered, "default triggered must be false");
         assert_eq!(state.event_count, 0, "default event_count must be 0");
     }
 
@@ -96,13 +94,48 @@ mod tests {
     #[test]
     fn test_edge_state_can_populate() {
         let mut state = EdgeState::default();
-        assert_eq!(state.triggered, false);
+        assert_eq!(state.event_count, 0);
 
-        state.triggered = true;
         state.event_count = 5;
 
-        assert!(state.triggered);
         assert_eq!(state.event_count, 5);
+    }
+
+    #[test]
+    fn test_event_type_serde() {
+        use crate::model::predecessor::EventType;
+
+        let complete_json = serde_json::to_string(&EventType::Complete).expect("serialize Complete");
+        let failed_json = serde_json::to_string(&EventType::Failed).expect("serialize Failed");
+        let timeout_json = serde_json::to_string(&EventType::Timeout).expect("serialize Timeout");
+
+        assert_eq!(complete_json, "\"complete\"");
+        assert_eq!(failed_json, "\"failed\"");
+        assert_eq!(timeout_json, "\"timeout\"");
+
+        let deserialized_complete: EventType =
+            serde_json::from_str(&complete_json).expect("deserialize Complete");
+        let deserialized_failed: EventType =
+            serde_json::from_str(&failed_json).expect("deserialize Failed");
+        let deserialized_timeout: EventType =
+            serde_json::from_str(&timeout_json).expect("deserialize Timeout");
+
+        assert_eq!(deserialized_complete, EventType::Complete);
+        assert_eq!(deserialized_failed, EventType::Failed);
+        assert_eq!(deserialized_timeout, EventType::Timeout);
+
+        assert_eq!(
+            serde_json::to_string(&deserialized_complete).unwrap(),
+            complete_json
+        );
+        assert_eq!(
+            serde_json::to_string(&deserialized_failed).unwrap(),
+            failed_json
+        );
+        assert_eq!(
+            serde_json::to_string(&deserialized_timeout).unwrap(),
+            timeout_json
+        );
     }
 
     /// Verify that `EdgeDef` can be constructed with both `Strategy` variants.

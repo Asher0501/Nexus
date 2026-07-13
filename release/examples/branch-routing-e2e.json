@@ -1,0 +1,50 @@
+{
+  "nodes": [
+    {
+      "id": "reviewer",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "python scripts/reviewer_emit_approved.py"
+        }
+      ],
+      "process_timeout_secs": 30
+    },
+    {
+      "id": "approved_handler",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "python scripts/handler_approved.py"
+        }
+      ],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "rejected_handler",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "python scripts/handler_rejected.py"
+        }
+      ],
+      "process_timeout_secs": 10
+    }
+  ],
+  "edges": [
+    {
+      "from": "reviewer",
+      "to": "approved_handler",
+      "trigger": "any",
+      "event": "complete",
+      "exit_reason": "approved"
+    },
+    {
+      "from": "reviewer",
+      "to": "rejected_handler",
+      "trigger": "any",
+      "event": "complete",
+      "exit_reason": "rejected"
+    }
+  ]
+}

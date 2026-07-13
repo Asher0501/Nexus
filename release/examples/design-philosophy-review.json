@@ -1,0 +1,39 @@
+{
+  "nodes": [
+    {
+      "id": "ai_review",
+      "providers": [
+        {
+          "type": "shell",
+          "command": "python scripts/review_design_philosophy.py"
+        }
+      ],
+      "process_timeout_secs": 300
+    },
+    {
+      "id": "approved_handler",
+      "providers": [
+        {
+          "type": "shell",
+          "command": "python scripts/handler_approved.py"
+        }
+      ],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "rejected_handler",
+      "providers": [
+        {
+          "type": "shell",
+          "command": "python scripts/handler_rejected.py"
+        }
+      ],
+      "process_timeout_secs": 10
+    }
+  ],
+  "edges": [
+    { "from": "ai_review", "to": "approved_handler", "trigger": "any", "event": "complete", "exit_reason": "approved" },
+    { "from": "ai_review", "to": "rejected_handler", "trigger": "any", "event": "complete", "exit_reason": "rejected" }
+  ],
+  "dataflows": []
+}

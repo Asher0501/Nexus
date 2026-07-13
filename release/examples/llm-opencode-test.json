@@ -1,0 +1,32 @@
+{
+  "nodes": [
+    {
+      "id": "seed",
+      "providers": [
+        {
+          "type": "shell",
+          "command": "python -c __import__('sys').stdout.write(bytes.fromhex('7b22726f757465223a226f6b222c22636f6e74656e74223a22666e2064697669646528613a6933322c20623a69333229202d3e20693332207b2061202f2062207d227d').decode())"
+        }
+      ],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "review",
+      "providers": [
+        {
+          "type": "llm",
+          "command": "opencode run --format json --auto -- \"{{prompt}}\"",
+          "prompt": "Review this Rust code for bugs: {{inputs.seed}}",
+          "routes": ["approved", "rejected"]
+        }
+      ],
+      "process_timeout_secs": 120
+    }
+  ],
+  "edges": [
+    { "from": "seed", "to": "review", "trigger": "any", "event": "complete" }
+  ],
+  "dataflows": [
+    { "from": "seed", "to": "review" }
+  ]
+}

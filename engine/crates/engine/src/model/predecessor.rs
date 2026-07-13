@@ -60,24 +60,3 @@ pub struct DataFlowDef {
     #[serde(default)]
     pub alias: Option<String>,
 }
-
-/// Declaration of a predecessor relationship from the workflow JSON.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PredecessorDef {
-    /// The upstream node ID.
-    pub node_id: String,
-
-    /// Combination logic (All or Any).
-    pub trigger: TriggerExpr,
-
-    /// Which event type triggers this edge.
-    pub event: EventType,
-
-    /// Optional exit_reason filter (string match).
-    #[serde(default)]
-    pub exit_reason: Option<String>,
-
-    /// Number of matching events required before triggering.
-    #[serde(default = "default_threshold")]
-    pub threshold: u64,
-}

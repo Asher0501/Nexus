@@ -34,7 +34,7 @@ impl Builder {
     /// This is the primary entry point. It runs all build phases in order:
     ///
     /// 1. Create nodes in the underlying stable digraph
-    /// 2. Build edges from `PredecessorDef` declarations
+    /// 2. Build edges from `SchedulingEdgeDef` declarations
     /// 3. Build transfer functions (`f_v`) that aggregate outgoing edges per node
     /// 4. Extract per-node execution parameters
     ///
@@ -66,15 +66,6 @@ impl Builder {
         let mut graph: StableDiGraph<NodeData, ()> = StableDiGraph::new();
         let mut index: HashMap<String, NodeIndex> = HashMap::new();
 
-        // Pre-process dataflows: group inputs by target node ID.
-        let mut input_map: HashMap<&str, Vec<String>> = HashMap::new();
-        for df in &def.dataflows {
-            input_map
-                .entry(df.to.as_str())
-                .or_default()
-                .push(df.alias.clone().unwrap_or_else(|| df.from.clone()));
-        }
-
         for node_def in &def.nodes {
             if index.contains_key(&node_def.id) {
                 return Err(vec![ValidationError::DuplicateNodeId {
@@ -85,6 +76,8 @@ impl Builder {
                 id: node_def.id.clone(),
                 providers: node_def.providers.clone(),
                 process_timeout_secs: node_def.process_timeout_secs,
+                route_policy: node_def.route_policy.clone(),
+                max_retries: node_def.max_retries,
             };
             let idx = graph.add_node(node_data);
             index.insert(node_def.id.clone(), idx);
@@ -211,15 +204,13 @@ mod tests {
     use crate::model::workflow::{NodeDef, WorkflowDef};
 
     fn make_node(id: &str) -> NodeDef {
-        NodeDef {
-            id: id.into(),
-            providers: vec![ProviderDef::Subprocess {
-                command: "echo".into(),
-            }],
-            process_timeout_secs: 10,
-            returns: vec![],
-            max_retries: None,
-        }
+        NodeDef { id: id.into(),
+        providers: vec![ProviderDef::Subprocess {
+            command: "echo".into(),
+        }],
+        process_timeout_secs: 10,
+        returns: vec![],
+        max_retries: None, route_policy: None }
     }
 
     fn sched_edge(from: &str, to: &str) -> SchedulingEdgeDef {
@@ -364,6 +355,7 @@ mod tests {
                     process_timeout_secs: 60,
                     returns: vec!["ok".into()],
                     max_retries: Some(5),
+                    route_policy: None,
                 },
                 make_node("collector"),
             ],

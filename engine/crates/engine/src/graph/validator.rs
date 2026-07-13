@@ -65,6 +65,15 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
         }
     }
 
+    // 7b. ZeroTimeout
+    for node in &def.nodes {
+        if node.process_timeout_secs == 0 {
+            errors.push(ValidationError::ZeroTimeout {
+                node_id: node.id.clone(),
+            });
+        }
+    }
+
     // Build a set of all node IDs for quick lookup.
     let all_node_ids: HashSet<&str> =
         def.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -84,19 +93,17 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
         errors.push(ValidationError::NoEntryNode);
     }
 
+    // Build shared child_map and reachable set for all reachability checks.
+    // This avoids building the same adjacency map 3 times across 4/6/9.
+    let child_map: HashMap<&str, Vec<&str>> = build_child_map(&def.edges);
+    let reachable: HashSet<&str> = if !entry_ids.is_empty() {
+        bfs_from(entry_ids.as_slice(), &child_map)
+    } else {
+        HashSet::new()
+    };
+
     // 4. UnreachableNode
     if !entry_ids.is_empty() {
-        // Build adjacency: node → children (from scheduling edges).
-        let mut child_map: HashMap<&str, Vec<&str>> = HashMap::new();
-        for edge in &def.edges {
-            child_map
-                .entry(edge.from.as_str())
-                .or_default()
-                .push(edge.to.as_str());
-        }
-
-        let reachable: HashSet<&str> = bfs_from(entry_ids.as_slice(), &child_map);
-
         for node_id in &all_node_ids {
             if !reachable.contains(node_id) {
                 errors.push(ValidationError::UnreachableNode {
@@ -136,8 +143,8 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
         }
     }
 
-    // 6. CycleWithoutEntry
-    if find_cycle_without_entry(&def.nodes, &def.edges.as_slice(), &entry_ids).is_some() {
+    // 6. CycleWithoutEntry (reuses `reachable` from above)
+    if find_cycle_without_entry(&def.nodes, &def.edges.as_slice(), &reachable).is_some() {
         errors.push(ValidationError::CycleWithoutEntry);
     }
 
@@ -157,17 +164,8 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
         }
     }
 
-    // 9. InputSourceUnreachable
+    // 9. InputSourceUnreachable (reuses `reachable` from above)
     if !entry_ids.is_empty() {
-        let mut child_map: HashMap<&str, Vec<&str>> = HashMap::new();
-        for edge in &def.edges {
-            child_map
-                .entry(edge.from.as_str())
-                .or_default()
-                .push(edge.to.as_str());
-        }
-
-        let reachable: HashSet<&str> = bfs_from(entry_ids.as_slice(), &child_map);
 
         for df in &def.dataflows {
             if id_to_node.contains_key(df.from.as_str())
@@ -186,6 +184,18 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
     } else {
         Err(errors)
     }
+}
+
+/// Build a child-adjacency map from scheduling edges: node → [children].
+fn build_child_map<'a>(edges: &'a [SchedulingEdgeDef]) -> HashMap<&'a str, Vec<&'a str>> {
+    let mut child_map: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in edges {
+        child_map
+            .entry(edge.from.as_str())
+            .or_default()
+            .push(edge.to.as_str());
+    }
+    child_map
 }
 
 /// BFS traversal from `roots` following the edges in `adjacency`.
@@ -215,16 +225,16 @@ fn bfs_from<'a>(
     visited
 }
 
-/// Detect cycles that have no entry node using Tarjan's SCC algorithm.
+/// Detect cycles that are unreachable from any entry node using Tarjan's SCC.
 ///
 /// Returns `Some` with the node ID of the first non-trivial SCC (size > 1)
-/// that contains no entry node, or a self-loop at a non-entry node.
+/// where **all** nodes in the SCC are unreachable from entries, or a self-loop
+/// at an unreachable node.
 fn find_cycle_without_entry<'a>(
     nodes: &'a [NodeDef],
     edges: &[SchedulingEdgeDef],
-    entry_ids: &[&str],
+    reachable_from_entries: &HashSet<&str>,
 ) -> Option<&'a str> {
-    let entry_set: HashSet<&str> = entry_ids.iter().copied().collect();
 
     // Build a petgraph directed graph from the workflow definitions.
     // Edge direction: from → to.
@@ -248,25 +258,24 @@ fn find_cycle_without_entry<'a>(
 
     for scc in &sccs {
         if scc.len() > 1 {
-            // Non-trivial SCC — check if any node is an entry.
-            let scc_names: Vec<&&str> = scc
-                .iter()
-                .map(|&idx| graph.node_weight(idx).unwrap_or(&""))
-                .collect();
-            let has_entry = scc_names
-                .iter()
-                .any(|name| entry_set.contains(*name));
-            if !has_entry {
-                // Look up the node in the original `nodes` slice to get a reference
-                // with lifetime `'a`.
-                let first_name: &str = scc_names[0];
+            // Non-trivial SCC — only flag it if ALL nodes are
+            // unreachable from entries.
+            let all_unreachable = scc.iter().all(|&idx| {
+                let name = graph.node_weight(idx).unwrap_or(&"");
+                !reachable_from_entries.contains(name)
+            });
+            if all_unreachable {
+                let first_name: &str = scc
+                    .iter()
+                    .find_map(|&idx| graph.node_weight(idx))
+                    .unwrap_or(&"");
                 return nodes.iter().find(|n| n.id.as_str() == first_name).map(|n| n.id.as_str());
             }
         } else if scc.len() == 1 {
-            // Self-loop: a single-node SCC with an edge to itself.
+            // Self-loop: only flag if the node is unreachable from entries.
             let idx = scc[0];
             let name = graph.node_weight(idx).unwrap_or(&"");
-            if !entry_set.contains(name) {
+            if !reachable_from_entries.contains(name) {
                 let has_self_loop = edges.iter().any(|e| {
                     e.from == *name && e.to == *name
                 });
@@ -288,22 +297,18 @@ mod tests {
     use crate::model::workflow::NodeDef;
 
     fn make_node(id: &str) -> NodeDef {
-        NodeDef {
-            id: id.into(),
-            providers: vec![ProviderDef::Subprocess {
-                command: "echo".into(),
-            }],
-            process_timeout_secs: 10,
-            returns: vec![],
-            max_retries: None,
-        }
+        NodeDef { id: id.into(),
+        providers: vec![ProviderDef::Subprocess {
+            command: "echo".into(),
+        }],
+        process_timeout_secs: 10,
+        returns: vec![],
+        max_retries: None, route_policy: None }
     }
 
     fn make_node_with_providers(id: &str, providers: Vec<ProviderDef>) -> NodeDef {
-        NodeDef {
-            providers,
-            ..make_node(id)
-        }
+        NodeDef { providers, route_policy: None,
+        ..make_node(id) }
     }
 
     fn sched_edge(from: &str, to: &str) -> SchedulingEdgeDef {

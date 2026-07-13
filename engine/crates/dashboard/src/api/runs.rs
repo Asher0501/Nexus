@@ -15,45 +15,75 @@ pub async fn list(
     State(store): State<Store>,
     Path(wf_id): Path<String>,
 ) -> Json<Vec<RunRow>> {
-    match store.list_runs_for_workflow(&wf_id) {
-        Ok(rows) => Json(rows),
-        Err(e) => {
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.list_runs_for_workflow(&wf_id)).await {
+        Ok(Ok(rows)) => Json(rows),
+        Ok(Err(e)) => {
             tracing::error!("[Runs] list failed: {e}");
+            Json(vec![])
+        }
+        Err(join_err) => {
+            tracing::error!("[Runs] list spawn_blocking panicked: {join_err}");
             Json(vec![])
         }
     }
 }
 
 /// POST /api/workflows/{id}/run — trigger a workflow run.
+///
+/// Optional JSON body: `{"max_concurrency": N}` to override the default concurrency.
 pub async fn trigger(
     State(store): State<Store>,
     State(room): State<Arc<WsRoom>>,
     Path(wf_id): Path<String>,
+    body: Option<Json<Value>>,
 ) -> (StatusCode, Json<Value>) {
-    let wf = match store.get_workflow(&wf_id) {
-        Ok(Some(w)) => w,
-        Ok(None) => {
+    let store_for_wf = store.clone();
+    let wf_id_for_wf = wf_id.clone();
+    let wf = match tokio::task::spawn_blocking(move || store_for_wf.get_workflow(&wf_id_for_wf)).await {
+        Ok(Ok(Some(w))) => w,
+        Ok(Ok(None)) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "workflow not found"})),
             );
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::error!("[Runs] trigger get_workflow failed: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": e.to_string()})),
             );
         }
+        Err(join_err) => {
+            tracing::error!("[Runs] trigger get_workflow spawn_blocking panicked: {join_err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal error"})),
+            );
+        }
     };
 
     let run_id = uuid::Uuid::new_v4().to_string();
-    if let Err(e) = store.create_run(&run_id, &wf_id) {
-        tracing::error!("[Runs] trigger create_run failed: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        );
+    let store_for_create = store.clone();
+    let run_id_clone = run_id.clone();
+    let wf_id_clone = wf_id.clone();
+    match tokio::task::spawn_blocking(move || store_for_create.create_run(&run_id_clone, &wf_id_clone)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::error!("[Runs] trigger create_run failed: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            );
+        }
+        Err(join_err) => {
+            tracing::error!("[Runs] trigger create_run spawn_blocking panicked: {join_err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal error"})),
+            );
+        }
     }
 
     // Run the workflow in the background — does not block the HTTP response.
@@ -61,8 +91,11 @@ pub async fn trigger(
     let store_clone = store.clone();
     let room_clone = room.clone();
     let run_id_clone = run_id.clone();
+    let max_concurrency = body
+        .and_then(|b| b.get("max_concurrency").and_then(|v| v.as_u64()))
+        .map(|n| n as usize);
     tokio::spawn(async move {
-        let config = EngineConfig::default();
+        let config = EngineConfig::new(max_concurrency, 3600, 3);
         match engine_bridge::run_workflow(&def, config, room_clone, &run_id_clone).await {
             Ok(_) => {
                 if let Err(e) = store_clone.finish_run(&run_id_clone, "completed", None) {
@@ -71,7 +104,7 @@ pub async fn trigger(
             }
             Err(e) => {
                 tracing::error!("[Runs] workflow execution failed: {e}");
-                if let Err(e2) = store_clone.finish_run(&run_id_clone, "failed", None) {
+                if let Err(e2) = store_clone.finish_run(&run_id_clone, "failed", Some(&e)) {
                     tracing::error!("[Runs] finish_run (failed) failed: {e2}");
                 }
             }
@@ -86,10 +119,15 @@ pub async fn trigger(
 
 /// GET /api/runs — list all runs.
 pub async fn list_all(State(store): State<Store>) -> Json<Vec<RunRow>> {
-    match store.list_runs() {
-        Ok(rows) => Json(rows),
-        Err(e) => {
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.list_runs()).await {
+        Ok(Ok(rows)) => Json(rows),
+        Ok(Err(e)) => {
             tracing::error!("[Runs] list_all failed: {e}");
+            Json(vec![])
+        }
+        Err(join_err) => {
+            tracing::error!("[Runs] list_all spawn_blocking panicked: {join_err}");
             Json(vec![])
         }
     }
@@ -100,40 +138,51 @@ pub async fn get_by_id(
     State(store): State<Store>,
     Path(run_id): Path<String>,
 ) -> Json<Value> {
-    match store.get_run(&run_id) {
-        Ok(Some(run)) => Json(json!({
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.get_run(&run_id)).await {
+        Ok(Ok(Some(run))) => Json(json!({
             "run_id": run.id,
             "workflow_id": run.workflow_id,
             "status": run.status,
             "started_at": run.started_at,
             "finished_at": run.finished_at,
         })),
-        Ok(None) => Json(json!({"error": "run not found"})),
-        Err(e) => {
+        Ok(Ok(None)) => Json(json!({"error": "run not found"})),
+        Ok(Err(e)) => {
             tracing::error!("[Runs] get_by_id failed: {e}");
             Json(json!({"error": e.to_string()}))
+        }
+        Err(join_err) => {
+            tracing::error!("[Runs] get_by_id spawn_blocking panicked: {join_err}");
+            Json(json!({"error": "internal error"}))
         }
     }
 }
 
 /// POST /api/runs/{run_id}/stop — stop a running workflow.
+///
+/// Not yet implemented — the engine does not currently expose a cancellation
+/// handle.  Returns 501 Not Implemented until runtime cancellation is wired.
 pub async fn stop(
-    State(_store): State<Store>,
     Path(run_id): Path<String>,
-) -> Json<Value> {
-    // TODO(#future): implement actual running-node cancellation via engine handle.
-    Json(json!({"run_id": run_id, "status": "stopping"}))
+) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"run_id": run_id, "error": "stop is not yet implemented"})),
+    )
 }
 
 /// GET /api/runs/{run_id}/graph — live graph status for a run.
+///
+/// Not yet implemented — requires the engine to expose a run-id-keyed
+/// graph snapshot.  Returns 501 Not Implemented.
 pub async fn graph_status(
     Path(run_id): Path<String>,
-) -> Json<Value> {
-    Json(json!({
-        "run_id": run_id,
-        "nodes": [],
-        "edges": []
-    }))
+) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"run_id": run_id, "error": "live graph is not yet implemented"})),
+    )
 }
 
 #[cfg(test)]
@@ -222,20 +271,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_graph_status() {
+    async fn test_graph_status_returns_501() {
         let app = app();
         let res = app
             .oneshot(Request::get("/runs/test-run-1/graph").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(res.status(), 200);
+        assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);
         let body: Value = serde_json::from_slice(
             &axum::body::to_bytes(res.into_body(), usize::MAX)
                 .await
                 .unwrap(),
         )
         .unwrap();
-        assert!(body["nodes"].is_array());
-        assert!(body["edges"].is_array());
+        assert!(body["error"].as_str().is_some());
     }
 }

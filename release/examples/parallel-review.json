@@ -1,0 +1,35 @@
+{
+  "nodes": [
+    {
+      "id": "a",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "opencode run --format json --dangerously-skip-permissions -- \"用一句话总结 Rust 的三大特点\""
+        }
+      ],
+      "process_timeout_secs": 120
+    },
+    {
+      "id": "b",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "opencode run --format json --dangerously-skip-permissions -- \"用一句话总结 Go 的三大特点\""
+        }
+      ],
+      "process_timeout_secs": 120
+    },
+    {
+      "id": "c",
+      "providers": [
+        {
+          "type": "subprocess",
+          "command": "opencode run --format json --dangerously-skip-permissions -- \"用一句话总结 TypeScript 的三大特点\""
+        }
+      ],
+      "process_timeout_secs": 120
+    }
+  ],
+  "edges": []
+}

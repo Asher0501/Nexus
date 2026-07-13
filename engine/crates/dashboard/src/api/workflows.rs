@@ -7,10 +7,15 @@ use crate::models::WorkflowRow;
 
 /// GET /api/workflows — list all workflows.
 pub async fn list(State(store): State<Store>) -> Json<Vec<WorkflowRow>> {
-    match store.list_workflows() {
-        Ok(rows) => Json(rows),
-        Err(e) => {
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.list_workflows()).await {
+        Ok(Ok(rows)) => Json(rows),
+        Ok(Err(e)) => {
             tracing::error!("[Workflows] list failed: {e}");
+            Json(vec![])
+        }
+        Err(join_err) => {
+            tracing::error!("[Workflows] list spawn_blocking panicked: {join_err}");
             Json(vec![])
         }
     }
@@ -25,7 +30,8 @@ pub async fn create(
     let name = body
         .get("name")
         .and_then(Value::as_str)
-        .unwrap_or("unnamed");
+        .unwrap_or("unnamed")
+        .to_string();
     let definition = body
         .get("definition")
         .map(|v| match v {
@@ -34,11 +40,17 @@ pub async fn create(
         })
         .unwrap_or_else(|| "{}".into());
 
-    match store.create_workflow(&id, name, &definition) {
-        Ok(_) => Json(json!({"id": id, "status": "created"})),
-        Err(e) => {
+    let store = store.clone();
+    let id_clone = id.clone();
+    match tokio::task::spawn_blocking(move || store.create_workflow(&id_clone, &name, &definition)).await {
+        Ok(Ok(_)) => Json(json!({"id": id, "status": "created"})),
+        Ok(Err(e)) => {
             tracing::error!("[Workflows] create failed: {e}");
             Json(json!({"error": e.to_string()}))
+        }
+        Err(join_err) => {
+            tracing::error!("[Workflows] create spawn_blocking panicked: {join_err}");
+            Json(json!({"error": "internal error"}))
         }
     }
 }
@@ -48,18 +60,23 @@ pub async fn get_by_id(
     State(store): State<Store>,
     Path(id): Path<String>,
 ) -> Json<Value> {
-    match store.get_workflow(&id) {
-        Ok(Some(wf)) => Json(json!({
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.get_workflow(&id)).await {
+        Ok(Ok(Some(wf))) => Json(json!({
             "id": wf.id,
             "name": wf.name,
             "definition": wf.definition,
             "created_at": wf.created_at,
             "updated_at": wf.updated_at,
         })),
-        Ok(None) => Json(json!({"error": "workflow not found"})),
-        Err(e) => {
+        Ok(Ok(None)) => Json(json!({"error": "workflow not found"})),
+        Ok(Err(e)) => {
             tracing::error!("[Workflows] get_by_id failed: {e}");
             Json(json!({"error": e.to_string()}))
+        }
+        Err(join_err) => {
+            tracing::error!("[Workflows] get_by_id spawn_blocking panicked: {join_err}");
+            Json(json!({"error": "internal error"}))
         }
     }
 }
@@ -82,11 +99,19 @@ pub async fn update(
         })
         .unwrap_or_else(|| "{}".into());
 
-    match store.update_workflow(&id, name, &definition) {
-        Ok(_) => Json(json!({"id": id, "status": "updated"})),
-        Err(e) => {
+    let store = store.clone();
+    let id_clone = id.clone();
+    let name = name.to_string();
+    let definition = definition.to_string();
+    match tokio::task::spawn_blocking(move || store.update_workflow(&id_clone, &name, &definition)).await {
+        Ok(Ok(_)) => Json(json!({"id": id, "status": "updated"})),
+        Ok(Err(e)) => {
             tracing::error!("[Workflows] update failed: {e}");
             Json(json!({"error": e.to_string()}))
+        }
+        Err(join_err) => {
+            tracing::error!("[Workflows] update spawn_blocking panicked: {join_err}");
+            Json(json!({"error": "internal error"}))
         }
     }
 }
@@ -96,11 +121,17 @@ pub async fn delete(
     State(store): State<Store>,
     Path(id): Path<String>,
 ) -> Json<Value> {
-    match store.delete_workflow(&id) {
-        Ok(_) => Json(json!({"id": id, "status": "deleted"})),
-        Err(e) => {
+    let store = store.clone();
+    let id_clone = id.clone();
+    match tokio::task::spawn_blocking(move || store.delete_workflow(&id_clone)).await {
+        Ok(Ok(_)) => Json(json!({"id": id, "status": "deleted"})),
+        Ok(Err(e)) => {
             tracing::error!("[Workflows] delete failed: {e}");
             Json(json!({"error": e.to_string()}))
+        }
+        Err(join_err) => {
+            tracing::error!("[Workflows] delete spawn_blocking panicked: {join_err}");
+            Json(json!({"error": "internal error"}))
         }
     }
 }
@@ -112,12 +143,17 @@ pub async fn graph(
     State(store): State<Store>,
     Path(id): Path<String>,
 ) -> Json<Value> {
-    let wf = match store.get_workflow(&id) {
-        Ok(Some(w)) => w,
-        Ok(None) => return Json(json!({"error": "workflow not found"})),
-        Err(e) => {
+    let store = store.clone();
+    let wf = match tokio::task::spawn_blocking(move || store.get_workflow(&id)).await {
+        Ok(Ok(Some(w))) => w,
+        Ok(Ok(None)) => return Json(json!({"error": "workflow not found"})),
+        Ok(Err(e)) => {
             tracing::error!("[Workflows] graph failed: {e}");
             return Json(json!({"error": e.to_string()}));
+        }
+        Err(join_err) => {
+            tracing::error!("[Workflows] graph spawn_blocking panicked: {join_err}");
+            return Json(json!({"error": "internal error"}));
         }
     };
 
@@ -151,10 +187,21 @@ pub async fn graph(
                 .map(|arr| {
                     arr.iter()
                         .map(|e| {
+                            let label = format!(
+                                "{}{}",
+                                e.get("event").and_then(|v| v.as_str()).unwrap_or("complete"),
+                                e.get("exit_reason")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .map(|r| format!("/{}", r))
+                                    .unwrap_or_default()
+                            );
                             json!({
                                 "from": e.get("from"),
                                 "to": e.get("to"),
-                                "label": "complete",
+                                "event": e.get("event"),
+                                "exit_reason": e.get("exit_reason"),
+                                "label": label,
                             })
                         })
                         .collect::<Vec<_>>()

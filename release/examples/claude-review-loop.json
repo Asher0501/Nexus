@@ -1,0 +1,61 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "providers": [
+        {
+          "type": "shell",
+          "command": "python -c \"import sys,json; json.dump({'route':'ok','content':'fn process(data: &[i32]) -> i32 { data.iter().sum() } // TODO: handle empty input'}, sys.stdout)\""
+        }
+      ],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "review",
+      "providers": [
+        {
+          "type": "llm",
+          "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
+          "prompt": "You are a code reviewer. Review the code and respond with JSON: {\"route\":\"approved\"|\"rejected\",\"content\":\"your review\"}. Route 'approved' if the code meets all quality standards. Route 'rejected' if there are bugs, missing edge cases, or style issues. Always find at least one improvement.\n\nCode to review: {{inputs.start}}",
+          "routes": ["approved", "rejected"]
+        }
+      ],
+      "process_timeout_secs": 300,
+      "returns": ["approved", "rejected"]
+    },
+    {
+      "id": "fix",
+      "providers": [
+        {
+          "type": "llm",
+          "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
+          "prompt": "You are a code fixer. Given the review feedback, fix the code and output the corrected version as JSON: {\"route\":\"fixed\",\"content\":\"the fixed code\"}.\n\nReview feedback: {{inputs.review}}",
+          "routes": ["fixed"]
+        }
+      ],
+      "process_timeout_secs": 300,
+      "returns": ["fixed"]
+    },
+    {
+      "id": "retro",
+      "providers": [
+        {
+          "type": "shell",
+          "command": "python -c \"import sys,json; json.dump({'route':'done','content':'Workflow completed: code passed review.'}, sys.stdout)\""
+        }
+      ],
+      "process_timeout_secs": 10
+    }
+  ],
+  "edges": [
+    { "from": "start", "to": "review", "trigger": "any", "event": "complete" },
+    { "from": "review", "to": "fix", "trigger": "any", "event": "complete", "exit_reason": "rejected" },
+    { "from": "fix", "to": "review", "trigger": "any", "event": "complete" },
+    { "from": "review", "to": "retro", "trigger": "any", "event": "complete", "exit_reason": "approved" }
+  ],
+  "dataflows": [
+    { "from": "start", "to": "review" },
+    { "from": "review", "to": "fix" },
+    { "from": "fix", "to": "review", "alias": "fixed_code" }
+  ]
+}
