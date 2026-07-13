@@ -127,7 +127,7 @@ impl Store {
     pub fn create_run(&self, id: &str, workflow_id: &str) -> Result<()> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
-            "INSERT INTO runs (id, workflow_id, status) VALUES (?1, ?2, 'running')",
+            "INSERT INTO runs (id, workflow_id, status, started_at) VALUES (?1, ?2, 'running', datetime('now'))",
             params![id, workflow_id],
         )?;
         Ok(())
