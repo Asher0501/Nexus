@@ -99,6 +99,7 @@ const STATUS_COLORS = {
 let dagNetwork = null, dagNodes = null, dagEdges = null;
 let dagReady = false, pendingStatuses = []; // buffer before DAG init
 let logs = [], wsConnection = null;
+let nodeStates = {}; // node_id → {status, lastUpdate} for compact status panel
 
 // ── API ─────────────────────────────────────────────────────────
 async function api(method, path, body) {
@@ -310,7 +311,7 @@ async function renderRuns() {
 // ── Run Monitor ─────────────────────────────────────────────────
 async function renderRunMonitor(runId) {
   if (wsConnection) { wsConnection.close(); wsConnection = null; }
-  logs = [];
+  logs = []; nodeStates = {};
 
   let run;
   try { run = await GET('/api/runs/' + runId); } catch(e) { showError('Run not found'); return; }
@@ -328,7 +329,10 @@ async function renderRunMonitor(runId) {
     <button class="btn" data-action="goto" data-hash="#/runs">← All Runs</button>
     <div style="margin-top:16px" class="row">
       <div class="col"><div class="card"><h2>Live DAG</h2><div id="dag-live" class="dag-container"></div></div></div>
-      <div class="col"><div class="card"><h2>Log Stream</h2><div id="log-panel" class="log-panel"><span style="color:var(--muted)">Waiting for events...</span></div></div></div>
+      <div class="col">
+        <div class="card" style="margin-bottom:12px"><h2>Node Status</h2><div id="status-panel" style="font-size:13px;max-height:180px;overflow-y:auto"><span style="color:var(--muted)">Waiting...</span></div></div>
+        <div class="card"><h2>Raw Log</h2><div id="log-panel" class="log-panel"><span style="color:var(--muted)">Waiting for events...</span></div></div>
+      </div>
     </div>`;
 
   if (graph.nodes && graph.nodes.length) initDAG('dag-live', graph);
@@ -385,11 +389,36 @@ function initDAG(containerId, graphData) {
 }
 
 function updateNodeStatus(nodeId, status) {
+  nodeStates[nodeId] = { status, ts: Date.now() };
+  renderStatusPanel();
   if (dagReady && dagNodes) {
     dagNodes.update({ id: nodeId, color: { background: STATUS_COLORS[status] || '#64748b' } });
   } else {
     pendingStatuses.push({ nodeId, status });
   }
+}
+
+function renderStatusPanel() {
+  const panel = document.getElementById('status-panel');
+  if (!panel) return;
+  const ids = Object.keys(nodeStates);
+  if (!ids.length) { panel.innerHTML = '<span style="color:var(--muted)">Waiting...</span>'; return; }
+  // Sort: Running first, then most recent
+  ids.sort((a,b) => {
+    const sa = nodeStates[a].status, sb = nodeStates[b].status;
+    if (sa === 'Running' && sb !== 'Running') return -1;
+    if (sb === 'Running' && sa !== 'Running') return 1;
+    return (nodeStates[b].ts||0) - (nodeStates[a].ts||0);
+  });
+  panel.innerHTML = ids.map(id => {
+    const s = nodeStates[id];
+    const color = STATUS_COLORS[s.status] || '#64748b';
+    return `<div style="display:flex;align-items:center;padding:3px 0;border-bottom:1px solid var(--border)">
+      <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:8px;flex-shrink:0"></span>
+      <span style="flex:1;font-family:monospace;font-size:12px">${esc(id)}</span>
+      <span class="badge badge-${s.status}" style="font-size:10px">${s.status}</span>
+    </div>`;
+  }).join('');
 }
 
 // ── WebSocket ───────────────────────────────────────────────────

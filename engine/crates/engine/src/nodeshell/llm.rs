@@ -156,7 +156,9 @@ impl LlmExecutor {
 
         // Render the full command (replace {{prompt}} with the prompt from context)
         let prompt_text = ctx_with_prompt.extensions.get("prompt").map(|s| s.as_str()).unwrap_or("");
-        let rendered_cmd = self.command_template.replace("{{prompt}}", prompt_text);
+        // Escape double-quotes so the prompt survives argument parsing.
+        let escaped_prompt = prompt_text.replace('\\', "\\\\").replace('"', "\\\"");
+        let rendered_cmd = self.command_template.replace("{{prompt}}", &escaped_prompt);
 
         // Build Python command — pass the full CLI command via --cmd.
         // Try multiple Python interpreter names: on Windows, some users
