@@ -1,0 +1,55 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "providers": [{
+        "type": "shell",
+        "command": "python -c \"import sys,json; doc=open('../bak/theory/DESIGN_PHILOSOPHY.md',encoding='utf-8').read(); json.dump({'route':'ok','content':doc}, sys.stdout)\""
+      }],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "review",
+      "providers": [{
+        "type": "llm",
+        "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
+        "prompt": "You are a design document critic (Round {{metadata.run_count}}/3). Review the design philosophy document for:\n1. Consistency — does every section operate at the SAME abstraction altitude?\n2. Value — does each claim contribute something non-obvious and actionable?\n3. Completeness — any logical leaps or missing links between claims?\n\nOriginal document:\n{{inputs.start}}\n\nPrevious fix applied (Round {{metadata.run_count}} only):\n{{inputs.fix}}\n\nOutput ONLY a JSON with route field. If you find issues, route='needs_fix'. If the document is already excellent, route='done'.\n\nFormat:\n{\"route\":\"needs_fix|done\",\"content\":\"## Review Round {{metadata.run_count}}\\n\\n### Abstraction Consistency\\n...\\n### Claim Value Assessment\\n...\\n### Logical Gaps\\n...\\n### Verdict: (NEEDS_FIX | DONE)\"}",
+        "routes": ["needs_fix", "done"]
+      }],
+      "process_timeout_secs": 180,
+      "route_policy": { "type": "max_runs", "max": 3, "then_route": "done" }
+    },
+    {
+      "id": "fix",
+      "providers": [{
+        "type": "llm",
+        "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
+        "prompt": "You are a design document editor. Based on the review findings, rewrite the problematic sections. Output the IMPROVED TEXT that addresses every issue found.\n\nReview (Round {{metadata.run_count}}):\n{{inputs.review}}\n\nOriginal document (for context):\n{{inputs.start}}\n\nOutput ONLY:\n{\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\\n\\n### Issues Addressed\\n...\\n### Rewritten Sections\\n...\"}",
+        "routes": ["fixed"]
+      }],
+      "process_timeout_secs": 180
+    },
+    {
+      "id": "report",
+      "providers": [{
+        "type": "shell",
+        "command": "python -c \"import sys,json; ctx=json.load(sys.stdin); inputs=ctx.get('inputs',{}); rev=inputs.get('review',''); fix=inputs.get('fix',''); open('review.md','w',encoding='utf-8').write(rev); open('fix.md','w',encoding='utf-8').write(fix); print(json.dumps({'route':'ok','content':'review.md + fix.md written'}))\""
+      }],
+      "process_timeout_secs": 10
+    }
+  ],
+  "edges": [
+    { "from": "start",  "to": "review", "trigger": "any", "event": "complete" },
+    { "from": "review", "to": "fix",    "trigger": "any", "event": "complete", "exit_reason": "needs_fix" },
+    { "from": "fix",    "to": "review", "trigger": "any", "event": "complete" },
+    { "from": "review", "to": "report", "trigger": "any", "event": "complete", "exit_reason": "done" }
+  ],
+  "dataflows": [
+    { "from": "start",  "to": "review" },
+    { "from": "start",  "to": "fix" },
+    { "from": "fix",    "to": "review" },
+    { "from": "review", "to": "fix" },
+    { "from": "review", "to": "report" },
+    { "from": "fix",    "to": "report" }
+  ]
+}

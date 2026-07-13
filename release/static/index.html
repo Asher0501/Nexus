@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nexus Dashboard</title>
+<script src="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.js"></script>
 <style>
 :root {
   --bg: #0f172a; --card: #1e293b; --border: #334155;
@@ -43,7 +44,7 @@ td { font-size: 13px; }
 .badge-TimedOut { background: var(--amber); color: #000; }
 .row { display: flex; gap: 16px; }
 .col { flex: 1; min-width: 0; }
-.dag-container { width: 100%; height: 450px; border: 1px solid var(--border);
+.dag-container { width: 100%; height: 520px; border: 1px solid var(--border);
   border-radius: 8px; background: var(--bg); position: relative; overflow: hidden; }
 .log-panel { height: 300px; overflow-y: auto; font: 12px/1.6 'Cascadia Code','Fira Code',monospace;
   background: #0a0f19; border-radius: 8px; padding: 12px; }
@@ -343,49 +344,61 @@ function showError(msg) {
   document.getElementById('content').innerHTML = `<div class="empty">${esc(msg)}</div>`;
 }
 
-// ── DAG (vis-network, lazy-loaded) ──────────────────────────────
-let visReady = false;
-function loadVis(cb) {
-  if (visReady) return cb();
-  if (typeof vis !== 'undefined') { visReady = true; return cb(); }
-  const s = document.createElement('script');
-  s.src = 'https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.js';
-  s.onload = () => { visReady = true; cb(); };
-  s.onerror = () => { console.warn('vis-network CDN unavailable, DAG disabled'); };
-  document.head.appendChild(s);
-}
-
+// ── DAG (vis-network) ───────────────────────────────────────────
 function initDAG(containerId, graphData) {
   dagReady = false; pendingStatuses = [];
-  loadVis(() => {
-    const container = document.getElementById(containerId);
+  try {
+    var vis = window.vis;
+    var container = document.getElementById(containerId);
     if (!container || typeof vis === 'undefined') {
-      if (container) container.innerHTML = '<div class="empty">DAG viewer unavailable (vis-network CDN not reachable)</div>';
+      if (container) container.innerHTML = '<div class="empty">vis-network not loaded</div>';
       dagReady = true; return;
     }
-    dagNodes = new vis.DataSet(graphData.nodes.map(n => ({
-      id: n.id, label: n.label || n.id,
+
+    var nodes = graphData.nodes || [];
+    var edges = graphData.edges || [];
+
+    dagNodes = new vis.DataSet(nodes.map(function(n) { return {
+      id: n.id, label: n.label||n.id,
       color: { background: STATUS_COLORS.Pending, border: '#334155' },
-      borderWidth: 2, font: { color: '#e2e8f0', size: 12 },
-      shape: 'box', margin: 10,
-    })));
-    dagEdges = new vis.DataSet((graphData.edges || []).map((e, i) => ({
-      id: 'e'+i, from: e.from, to: e.to, label: e.label || '',
-      arrows: 'to', color: { color: '#475569' },
-      font: { color: '#94a3b8', size: 10 }, smooth: { type: 'curvedCW' },
-    })));
+      borderWidth: 2, font: { color: '#e2e8f0', size: 14 },
+      shape: 'box', margin: 14, widthConstraint: { minimum: 80, maximum: 140 },
+    }; }));
+
+    dagEdges = new vis.DataSet(edges.map(function(e, i) {
+      return {
+        id: 'e'+i, from: e.from, to: e.to, label: e.label||'',
+        arrows: { to: { enabled: true } },
+        color: { color: '#64748b' },
+        width: 1.5,
+        font: { color: '#94a3b8', size: 10, strokeWidth: 0 },
+        smooth: { type: 'cubicBezier' },
+      };
+    }));
+
     dagNetwork = new vis.Network(container, { nodes: dagNodes, edges: dagEdges }, {
-      layout: { hierarchical: { direction: 'LR', sortMethod: 'directed', levelSeparation: 150, nodeSpacing: 120 } },
+      layout: {
+        hierarchical: {
+          enabled: true, direction: 'LR', sortMethod: 'directed',
+          levelSeparation: 250, nodeSpacing: 180,
+          blockShifting: true, edgeMinimization: false,
+        },
+      },
       physics: false,
       interaction: { hover: true },
     });
+
     dagReady = true;
-    // Replay buffered status updates
-    for (const s of pendingStatuses) {
+    for (var i = 0; i < pendingStatuses.length; i++) {
+      var s = pendingStatuses[i];
       dagNodes.update({ id: s.nodeId, color: { background: STATUS_COLORS[s.status] || '#64748b' } });
     }
     pendingStatuses = [];
-  });
+  } catch(e) {
+    var c = document.getElementById(containerId);
+    if (c) c.innerHTML = '<div class="empty">DAG error: ' + (e.message||'') + '</div>';
+    dagReady = true;
+  }
 }
 
 function updateNodeStatus(nodeId, status) {
