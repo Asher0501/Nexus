@@ -8,3 +8,4 @@ nexus-engine = { path = "../engine" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { workspace = true, features = ["rt", "macros"] }
+uuid = { version = "1", features = ["v4"] }

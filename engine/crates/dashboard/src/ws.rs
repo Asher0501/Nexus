@@ -108,32 +108,33 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex};
 
 /// Sender half of an unbounded channel for a single WS connection.
 pub type Tx = mpsc::UnboundedSender<ServerMessage>;
 
 /// WebSocket room manager: each `run_id` maps to a set of senders.
 ///
+/// Disconnected senders (where `tx.send()` returns `Err`) are cleaned up
+/// lazily during `broadcast()` to prevent unbounded memory growth.
+///
 /// # Usage (server side)
-/// ```no_run
-/// # async fn example() {
+/// ```ignore
 /// let room = WsRoom::new();
 /// // In WS upgrade handler:
-/// let mut rx = WsRoom::join(&room, "run-123").await;
+/// let mut rx = room.join("run-123").await;
 /// // In engine callback:
-/// WsRoom::broadcast(&room, "run-123", ServerMessage::node_status("n1", "Running")).await;
-/// # }
+/// room.broadcast("run-123", ServerMessage::node_status("n1", "Running")).await;
 /// ```
 pub struct WsRoom {
-    rooms: RwLock<HashMap<String, Vec<Tx>>>,
+    rooms: Mutex<HashMap<String, Vec<Tx>>>,
 }
 
 impl WsRoom {
     /// Create a new shared room manager.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            rooms: RwLock::new(HashMap::new()),
+            rooms: Mutex::new(HashMap::new()),
         })
     }
 
@@ -141,7 +142,7 @@ impl WsRoom {
     pub async fn join(self: &Arc<Self>, run_id: &str) -> mpsc::UnboundedReceiver<ServerMessage> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.rooms
-            .write()
+            .lock()
             .await
             .entry(run_id.to_string())
             .or_default()
@@ -149,11 +150,16 @@ impl WsRoom {
         rx
     }
 
-     /// Send a message to every connection in the room.
+    /// Send a message to every connection in the room.
+    ///
+    /// Dead senders (whose receivers have been dropped) are pruned
+    /// from the room during this call to prevent unbounded growth.
     pub async fn broadcast(&self, run_id: &str, msg: ServerMessage) {
-        if let Some(senders) = self.rooms.read().await.get(run_id) {
-            for tx in senders {
-                let _ = tx.send(msg.clone());
+        let mut rooms = self.rooms.lock().await;
+        if let Some(senders) = rooms.get_mut(run_id) {
+            senders.retain(|tx| tx.send(msg.clone()).is_ok());
+            if senders.is_empty() {
+                rooms.remove(run_id);
             }
         }
     }

@@ -150,55 +150,87 @@ async fn handle_describe_schema(id: &Value) -> Value {
                                     {
                                         "type": "object",
                                         "properties": {
+                                            "type": {"const": "shell"},
+                                            "command": {"type": "string"}
+                                        },
+                                        "required": ["type", "command"]
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {
                                             "type": {"const": "http"},
                                             "url": {"type": "string"},
                                             "method": {"type": "string"}
                                         },
                                         "required": ["type", "url"]
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {"const": "llm"},
+                                            "command": {"type": "string"},
+                                            "prompt": {"type": "string"},
+                                            "routes": {
+                                                "type": "array",
+                                                "items": {"type": "string"}
+                                            },
+                                            "max_tokens": {"type": "integer"}
+                                        },
+                                        "required": ["type", "command"]
                                     }
                                 ]
                             }
                         },
                         "process_timeout_secs": {"type": "integer", "minimum": 1},
-                        "edges": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "required": ["from", "to", "trigger", "event"],
-                                "properties": {
-                                    "from": {"type": "string", "description": "Source node ID"},
-                                    "to": {"type": "string", "description": "Target node ID"},
-                                    "trigger": {"type": "string", "enum": ["all", "any"]},
-                                    "event": {"type": "string", "enum": ["complete", "failed", "timeout"]},
-                                    "exit_reason": {"type": "string"},
-                                    "threshold": {"type": "integer", "minimum": 1}
-                                }
-                            }
-                        },
-                        "dataflows": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "required": ["from", "to"],
-                                "properties": {
-                                    "from": {"type": "string", "description": "Source node ID"},
-                                    "to": {"type": "string", "description": "Target node ID"},
-                                    "alias": {"type": "string", "description": "Key in the target node's inputs; defaults to source node ID"}
-                                }
-                            }
-                        },
                         "returns": {
                             "type": "array",
                             "items": {"type": "string"}
                         },
-                        "max_timeout_retries": {
+                        "max_retries": {
                             "type": "integer",
                             "minimum": 0
+                        },
+                        "route_policy": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["max_runs"]},
+                                "max": {"type": "integer", "minimum": 1},
+                                "then_route": {"type": "string"}
+                            },
+                            "required": ["type", "max", "then_route"]
                         }
                     }
                 }
+            },
+            "edges": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["from", "to", "trigger", "event"],
+                    "properties": {
+                        "from": {"type": "string", "description": "Source node ID"},
+                        "to": {"type": "string", "description": "Target node ID"},
+                        "trigger": {"type": "string", "enum": ["all", "any"]},
+                        "event": {"type": "string", "enum": ["complete", "failed", "timeout"]},
+                        "exit_reason": {"type": "string"},
+                        "threshold": {"type": "integer", "minimum": 1}
+                    }
+                }
+            },
+            "dataflows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["from", "to"],
+                    "properties": {
+                        "from": {"type": "string", "description": "Source node ID"},
+                        "to": {"type": "string", "description": "Target node ID"},
+                        "alias": {"type": "string", "description": "Key in target's inputs; defaults to source node ID"}
+                    }
+                }
             }
-        }
+        },
+        "required": ["nodes"]
     });
 
     make_success(serde_json::json!({"schema": schema}), id.clone())
@@ -227,8 +259,36 @@ async fn handle_run(params: &Value, id: &Value) -> Value {
         }
     };
 
+    let run_id = uuid::Uuid::new_v4().to_string();
     match engine.run().await {
-        Ok(_) => make_success(serde_json::json!({"status": "completed"}), id.clone()),
+        Ok(result) => {
+            let nodes: Value = result
+                .snapshot
+                .nodes
+                .iter()
+                .map(|(nid, ns)| {
+                    (
+                        nid.clone(),
+                        serde_json::json!({
+                            "status": format!("{:?}", ns.status),
+                            "result": format!("{:?}", ns.result),
+                            "retry_count": ns.retry_count,
+                        }),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+            make_success(
+                serde_json::json!({
+                    "run_id": run_id,
+                    "status": "completed",
+                    "duration_secs": result.snapshot.elapsed.as_secs(),
+                    "running_count": result.snapshot.running_count(),
+                    "nodes": nodes,
+                }),
+                id.clone(),
+            )
+        }
         Err(e) => make_error(-32603, format!("Runtime error: {e}"), id.clone()),
     }
 }

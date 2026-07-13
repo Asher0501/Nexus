@@ -4,6 +4,11 @@
 //! Designed to be started via `nexus-cli dashboard` or standalone.
 
 #![allow(missing_docs)]
+// The dashboard crate has both a bin and a lib target.  The
+// `unused_crate_dependencies` lint fires a false positive for the
+// crate's own name when the binary target uses `mod` items from the
+// library.  See rust-lang/rust#57274 for background.
+#![allow(unused_crate_dependencies)]
 
 // Silences `unused-crate-dependencies` — used in child modules.
 #[expect(unused_imports)]
@@ -20,6 +25,7 @@ mod db;
 mod engine_bridge;
 mod models;
 mod state;
+mod static_files;
 mod ws;
 
 use std::net::SocketAddr;
@@ -45,8 +51,22 @@ async fn main() {
         .with_state(state)
         .layer(CorsLayer::permissive());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 48080));
-    tracing::info!("[Dashboard.Server] listening on 127.0.0.1:48080");
+    // Optional static file serving: if NEXUS_STATIC_DIR (default ./static)
+    // exists, serve files from it as a fallback for non-API routes.
+    let static_dir = std::env::var("NEXUS_STATIC_DIR").unwrap_or_else(|_| "./static".into());
+    if std::path::Path::new(&static_dir).exists() {
+        tracing::info!("[Dashboard.Server] serving static files from: {static_dir}");
+    }
+    let app = app.fallback(static_files::handler);
+
+    let host = std::env::var("NEXUS_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port: u16 = std::env::var("NEXUS_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(48080);
+
+    let addr = SocketAddr::from((host.parse::<std::net::Ipv4Addr>().unwrap_or(std::net::Ipv4Addr::new(127, 0, 0, 1)), port));
+    tracing::info!("[Dashboard.Server] listening on {addr}");
     tracing::info!("[Dashboard.Server] REST API: /api/workflows, /api/runs");
     tracing::info!("[Dashboard.Server] WebSocket: /ws/runs/:run_id");
 

@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nexus Dashboard</title>
+<script src="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.js"></script>
+<link href="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.css" rel="stylesheet">
+<style>
+:root {
+  --bg: #0f172a; --card: #1e293b; --border: #334155;
+  --muted: #94a3b8; --text: #e2e8f0; --accent: #3b82f6;
+  --green: #22c55e; --red: #ef4444; --amber: #f59e0b; --slate: #64748b;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 24px; padding: 12px 20px;
+  background: var(--card); border-bottom: 1px solid var(--border); }
+header h1 { font-size: 18px; font-weight: 600; }
+nav { display: flex; gap: 4px; }
+nav a { padding: 6px 14px; border-radius: 6px; color: var(--muted); text-decoration: none;
+  font-size: 13px; transition: background .15s; }
+nav a:hover, nav a.active { background: #1e3a5f; color: var(--text); }
+main { max-width: 1200px; margin: 0 auto; padding: 20px; }
+h2 { font-size: 16px; margin-bottom: 12px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 16px; margin-bottom: 16px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; }
+td { font-size: 13px; }
+.btn { display: inline-block; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
+  text-decoration: none; transition: background .15s; }
+.btn:hover { background: #1e3a5f; }
+.btn-primary { background: var(--accent); border-color: var(--accent); }
+.btn-primary:hover { background: #2563eb; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px;
+  font-weight: 500; }
+.badge-pending { background: var(--slate); }
+.badge-running { background: var(--accent); }
+.badge-completed, .badge-Completed { background: var(--green); }
+.badge-failed, .badge-Failed { background: var(--red); }
+.badge-timedout, .badge-TimedOut { background: var(--amber); color: #000; }
+.row { display: flex; gap: 16px; }
+.col { flex: 1; }
+.dag-container { width: 100%; min-height: 420px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg); }
+.log-panel { height: 300px; overflow-y: auto; font: 12px/1.6 'Cascadia Code', 'Fira Code', monospace;
+  background: #0a0f19; border-radius: 8px; padding: 12px; }
+.log-line { padding: 1px 0; }
+.log-ts { color: var(--slate); margin-right: 8px; }
+.log-node { color: #38bdf8; margin-right: 8px; }
+.log-text { color: var(--muted); }
+.stats { display: flex; gap: 16px; margin-bottom: 20px; }
+.stat { flex: 1; background: var(--card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px; text-align: center; }
+.stat-val { font-size: 28px; font-weight: 700; }
+.stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.empty { color: var(--muted); text-align: center; padding: 40px; }
+.meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+.meta span { margin-right: 16px; }
+#toast { position: fixed; top: 16px; right: 16px; background: var(--green); color: #fff;
+  padding: 10px 20px; border-radius: 8px; font-size: 13px; z-index: 100;
+  opacity: 0; transition: opacity .3s; pointer-events: none; }
+#toast.show { opacity: 1; }
+input, textarea { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 8px 12px; font-size: 13px; width: 100%; }
+textarea { font-family: 'Cascadia Code', 'Fira Code', monospace; min-height: 200px; resize: vertical; }
+.form-group { margin-bottom: 12px; }
+.form-group label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Nexus Dashboard</h1>
+    <nav>
+      <a href="#dashboard" class="tab">Dashboard</a>
+      <a href="#workflows" class="tab">Workflows</a>
+      <a href="#runs" class="tab">Runs</a>
+    </nav>
+  </header>
+  <main id="content"></main>
+</div>
+<div id="toast"></div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────
+const BASE = window.location.origin;
+const WS_BASE = BASE.replace(/^http/, 'ws');
+const STATUS_COLORS = {
+  Pending: '#64748b', Running: '#3b82f6', Completed: '#22c55e',
+  Failed: '#ef4444', TimedOut: '#f59e0b', Skipped: '#475569',
+};
+
+// ── State ───────────────────────────────────────────────────────
+let dagNetwork = null, dagNodes = null, dagEdges = null;
+let logs = [], wsConnection = null;
+
+// ── API helpers ─────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(BASE + path, opts);
+  return r.json();
+}
+const get = p => api('GET', p);
+const post = (p, b) => api('POST', p, b);
+
+// ── Toast ───────────────────────────────────────────────────────
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+// ── Router ──────────────────────────────────────────────────────
+function nav() {
+  const hash = location.hash || '#dashboard';
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.hash === hash));
+  const [view, ...args] = hash.slice(1).split('/');
+  switch (view) {
+    case 'dashboard': renderDashboard(); break;
+    case 'workflows': args[0] ? renderWorkflowDetail(args[0]) : renderWorkflows(); break;
+    case 'runs': args[0] ? renderRunMonitor(args[0]) : renderRuns(); break;
+    default: renderDashboard();
+  }
+}
+window.addEventListener('hashchange', nav);
+window.addEventListener('load', nav);
+
+// ── Dashboard ───────────────────────────────────────────────────
+async function renderDashboard() {
+  const [wfs, runs] = await Promise.all([get('/api/workflows'), get('/api/runs')]);
+  const recentWfs = Array.isArray(wfs) ? wfs.slice(0, 5) : [];
+  const recentRuns = Array.isArray(runs) ? runs.slice(0, 5) : [];
+  document.getElementById('content').innerHTML = `
+    <div class="stats">
+      <div class="stat"><div class="stat-val">${Array.isArray(wfs) ? wfs.length : 0}</div><div class="stat-label">Workflows</div></div>
+      <div class="stat"><div class="stat-val">${Array.isArray(runs) ? runs.length : 0}</div><div class="stat-label">Runs</div></div>
+    </div>
+    <div class="row">
+      <div class="col"><div class="card">
+        <h2>Recent Workflows</h2>
+        ${recentWfs.length ? `<table><tr><th>Name</th><th>Updated</th><th></th></tr>
+          ${recentWfs.map(w => `<tr>
+            <td><a href="#workflows/${w.id}" style="color:var(--text)">${esc(w.name)}</a></td>
+            <td style="color:var(--muted)">${w.updated_at || '-'}</td>
+            <td><button class="btn btn-primary" onclick="triggerRun('${w.id}')">Run</button></td>
+          </tr>`).join('')}</table>` : '<div class="empty">No workflows yet</div>'}
+      </div></div>
+      <div class="col"><div class="card">
+        <h2>Recent Runs</h2>
+        ${recentRuns.length ? `<table><tr><th>ID</th><th>Status</th><th>Started</th></tr>
+          ${recentRuns.map(r => `<tr>
+            <td><a href="#runs/${r.id}" style="color:var(--text);font-family:monospace">${r.id.slice(0,8)}</a></td>
+            <td><span class="badge badge-${(r.status||'').toLowerCase()}">${r.status||'?'}</span></td>
+            <td style="color:var(--muted)">${r.started_at || '-'}</td>
+          </tr>`).join('')}</table>` : '<div class="empty">No runs yet</div>'}
+      </div></div>
+    </div>`;
+}
+
+// ── Workflows ───────────────────────────────────────────────────
+async function renderWorkflows() {
+  const wfs = await get('/api/workflows');
+  const list = Array.isArray(wfs) ? wfs : [];
+  document.getElementById('content').innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2 style="margin:0">Workflows</h2>
+      <button class="btn btn-primary" onclick="showCreateWorkflow()">+ New Workflow</button>
+    </div>
+    <div class="card">
+      ${list.length ? `<table><tr><th>Name</th><th>ID</th><th>Updated</th><th></th></tr>
+        ${list.map(w => `<tr>
+          <td><a href="#workflows/${w.id}" style="color:var(--text);font-weight:500">${esc(w.name)}</a></td>
+          <td style="font-family:monospace;color:var(--muted)">${w.id.slice(0,8)}</td>
+          <td style="color:var(--muted)">${w.updated_at || '-'}</td>
+          <td>
+            <button class="btn" onclick="event.stopPropagation();location.hash='#workflows/${w.id}'">View</button>
+            <button class="btn btn-primary" onclick="event.stopPropagation();triggerRun('${w.id}')">Run</button>
+            <button class="btn" onclick="event.stopPropagation();deleteWorkflow('${w.id}')">Del</button>
+          </td>
+        </tr>`).join('')}</table>` : '<div class="empty">No workflows. Create one to get started.</div>'}
+    </div>`;
+}
+
+function showCreateWorkflow() {
+  document.getElementById('content').innerHTML = `
+    <h2>New Workflow</h2>
+    <div class="card">
+      <div class="form-group"><label>Name</label><input id="wf-name" placeholder="my-workflow"></div>
+      <div class="form-group"><label>Definition (JSON)</label>
+        <textarea id="wf-def">${esc(`{
+  "nodes": [{ "id": "hello", "providers": [{ "type": "subprocess", "command": "python -c \\"import sys,json; json.dump({'route':'ok','content':'Hello Nexus'}, sys.stdout)\\"" }], "process_timeout_secs": 10 }]
+}`)}</textarea></div>
+      <button class="btn btn-primary" onclick="createWorkflow()">Create</button>
+      <button class="btn" onclick="nav()">Cancel</button>
+    </div>`;
+}
+
+async function createWorkflow() {
+  const name = document.getElementById('wf-name').value || 'unnamed';
+  const def = document.getElementById('wf-def').value;
+  await post('/api/workflows', { name, definition: def });
+  toast('Workflow created');
+  location.hash = '#workflows';
+}
+
+async function deleteWorkflow(id) {
+  if (!confirm('Delete this workflow and all its runs?')) return;
+  await api('DELETE', `/api/workflows/${id}`);
+  toast('Workflow deleted');
+  nav();
+}
+
+async function triggerRun(wfId) {
+  const r = await post(`/api/workflows/${wfId}/run`);
+  if (r.run_id) {
+    toast('Run started: ' + r.run_id.slice(0, 8));
+    location.hash = '#runs/' + r.run_id;
+  }
+}
+
+// ── Workflow Detail ─────────────────────────────────────────────
+async function renderWorkflowDetail(id) {
+  const wf = await get(`/api/workflows/${id}`);
+  if (wf.error) { document.getElementById('content').innerHTML = `<div class="empty">${wf.error}</div>`; return; }
+  const graph = await get(`/api/workflows/${id}/graph`);
+  document.getElementById('content').innerHTML = `
+    <div class="meta"><span>ID: ${id.slice(0,8)}</span><span>Name: ${esc(wf.name)}</span><span>Updated: ${wf.updated_at||'-'}</span></div>
+    <div style="margin-bottom:16px">
+      <button class="btn btn-primary" onclick="triggerRun('${id}')">▶ Run</button>
+      <button class="btn" onclick="location.hash='#workflows'">← Back</button>
+    </div>
+    <div class="card"><h2>DAG Topology</h2><div id="dag-view" class="dag-container"></div></div>`;
+  if (graph.nodes) initDAG('dag-view', graph);
+}
+
+// ── Runs ────────────────────────────────────────────────────────
+async function renderRuns() {
+  const runs = await get('/api/runs');
+  const list = Array.isArray(runs) ? runs : [];
+  document.getElementById('content').innerHTML = `
+    <h2>Run History</h2>
+    <div class="card">
+      ${list.length ? `<table><tr><th>Run ID</th><th>Workflow</th><th>Status</th><th>Started</th><th>Finished</th></tr>
+        ${list.map(r => `<tr style="cursor:pointer" onclick="location.hash='#runs/${r.id}'">
+          <td style="font-family:monospace">${r.id.slice(0,8)}</td>
+          <td>${r.workflow_id.slice(0,8)}</td>
+          <td><span class="badge badge-${(r.status||'').toLowerCase()}">${r.status||'?'}</span></td>
+          <td style="color:var(--muted)">${r.started_at || '-'}</td>
+          <td style="color:var(--muted)">${r.finished_at || '-'}</td>
+        </tr>`).join('')}</table>` : '<div class="empty">No runs yet</div>'}
+    </div>`;
+}
+
+// ── Run Monitor ─────────────────────────────────────────────────
+async function renderRunMonitor(runId) {
+  // Close previous WS
+  if (wsConnection) { wsConnection.close(); wsConnection = null; }
+  logs = [];
+
+  const run = await get(`/api/runs/${runId}`);
+  if (run.error) { document.getElementById('content').innerHTML = `<div class="empty">${run.error}</div>`; return; }
+
+  // Get workflow graph for DAG structure
+  let graph = { nodes: [], edges: [] };
+  try { graph = await get(`/api/workflows/${run.workflow_id}/graph`); } catch (_) {}
+
+  document.getElementById('content').innerHTML = `
+    <div class="meta">
+      <span>Run: <code>${runId.slice(0,8)}</code></span>
+      <span>Status: <span class="badge badge-${(run.status||'').toLowerCase()}" id="run-status-badge">${run.status||'?'}</span></span>
+      <span>Started: ${run.started_at||'-'}</span>
+    </div>
+    <button class="btn" onclick="location.hash='#runs'" style="margin-bottom:16px">← All Runs</button>
+    <div class="row">
+      <div class="col"><div class="card"><h2>Live DAG</h2><div id="dag-live" class="dag-container"></div></div></div>
+      <div class="col"><div class="card"><h2>Log Stream</h2><div id="log-panel" class="log-panel"><span style="color:var(--muted)">Waiting for events...</span></div></div></div>
+    </div>`;
+
+  if (graph.nodes) initDAG('dag-live', graph);
+  connectWS(runId);
+}
+
+// ── DAG Rendering ───────────────────────────────────────────────
+function initDAG(containerId, graphData) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  dagNodes = new vis.DataSet(graphData.nodes.map(n => ({
+    id: n.id, label: n.label || n.id,
+    color: { background: STATUS_COLORS.Pending, border: '#334155' },
+    borderWidth: 2, font: { color: '#e2e8f0', size: 12 },
+    shape: 'box', margin: 10,
+  })));
+  dagEdges = new vis.DataSet((graphData.edges || []).map((e, i) => ({
+    id: `e${i}`, from: e.from, to: e.to, label: e.label || '',
+    arrows: 'to', color: { color: '#475569' },
+    font: { color: '#94a3b8', size: 10 }, smooth: { type: 'curvedCW' },
+  })));
+  dagNetwork = new vis.Network(container, { nodes: dagNodes, edges: dagEdges }, {
+    layout: { hierarchical: { direction: 'LR', sortMethod: 'directed', levelSeparation: 150, nodeSpacing: 120 } },
+    physics: false,
+    interaction: { hover: true },
+  });
+}
+
+function updateNodeStatus(nodeId, status) {
+  if (dagNodes) dagNodes.update({ id: nodeId, color: { background: STATUS_COLORS[status] || '#64748b' } });
+}
+
+// ── WebSocket ───────────────────────────────────────────────────
+function connectWS(runId) {
+  const url = `${WS_BASE}/ws/runs/${runId}`;
+  wsConnection = new WebSocket(url);
+  wsConnection.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    switch (msg.type) {
+      case 'node_status':
+        updateNodeStatus(msg.data.node_id, msg.data.status);
+        appendLog(msg.data.node_id, `[status: ${msg.data.status}]`, msg.data.ts);
+        break;
+      case 'node_chunk':
+        appendLog(msg.data.node_id, msg.data.text, msg.data.ts);
+        break;
+      case 'snapshot':
+        if (msg.data.nodes) Object.entries(msg.data.nodes).forEach(([id, s]) => updateNodeStatus(id, s));
+        break;
+      case 'workflow_done':
+        appendLog('engine', `Workflow ${msg.data.status} (${msg.data.duration_secs}s)`, Math.floor(Date.now()/1000));
+        const badge = document.getElementById('run-status-badge');
+        if (badge) { badge.textContent = msg.data.status; badge.className = `badge badge-${msg.data.status}`; }
+        wsConnection.close();
+        break;
+      case 'error':
+        appendLog('error', msg.data.message, Math.floor(Date.now()/1000));
+        break;
+    }
+  };
+  wsConnection.onclose = () => { appendLog('ws', 'Disconnected', Math.floor(Date.now()/1000)); };
+  wsConnection.onerror = () => { appendLog('ws', 'Connection error', Math.floor(Date.now()/1000)); };
+}
+
+// ── Log Stream ──────────────────────────────────────────────────
+function appendLog(nodeId, text, ts) {
+  logs.push({ nodeId, text, ts });
+  if (logs.length > 500) logs.shift();
+  const panel = document.getElementById('log-panel');
+  if (!panel) return;
+  const t = new Date(ts * 1000).toLocaleTimeString();
+  panel.innerHTML = logs.map(l =>
+    `<div class="log-line"><span class="log-ts">${t}</span><span class="log-node">[${esc(l.nodeId)}]</span><span class="log-text">${esc(l.text)}</span></div>`
+  ).join('');
+  panel.scrollTop = panel.scrollHeight;
+}
+
+// ── Util ────────────────────────────────────────────────────────
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+</script>
+</body>
+</html>
