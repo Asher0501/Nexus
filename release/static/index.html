@@ -97,8 +97,8 @@ const STATUS_COLORS = {
 
 // ── State ───────────────────────────────────────────────────────
 let dagNetwork = null, dagNodes = null, dagEdges = null;
+let dagReady = false, pendingStatuses = []; // buffer before DAG init
 let logs = [], wsConnection = null;
-let currentWfDef = null; // cached workflow definition for run monitor
 
 // ── API ─────────────────────────────────────────────────────────
 async function api(method, path, body) {
@@ -223,9 +223,7 @@ function showCreateWorkflow() {
     <div class="card">
       <div class="form-group"><label>Name</label><input id="wf-name" placeholder="my-workflow" value=""></div>
       <div class="form-group"><label>Definition (JSON)</label>
-        <textarea id="wf-def">${esc(JSON.stringify({
-  nodes: [{ id: "hello", providers: [{ type: "shell", command: "echo {\\\"route\\\":\\\"ok\\\",\\\"content\\\":\\\"Hello Nexus\\\"}" }], process_timeout_secs: 10 }]
-}, null, 2))}</textarea></div>
+        <textarea id="wf-def">${esc('{\n  "nodes": [\n    {\n      "id": "hello",\n      "providers": [\n        { "type": "shell", "command": "scripts/node_ok.bat" }\n      ],\n      "process_timeout_secs": 10\n    }\n  ]\n}')}</textarea></div>
       <button class="btn btn-primary" data-action="create-wf">Create</button>
       <button class="btn" data-action="cancel-form">Cancel</button>
     </div>`;
@@ -354,11 +352,12 @@ function loadVis(cb) {
 }
 
 function initDAG(containerId, graphData) {
+  dagReady = false; pendingStatuses = [];
   loadVis(() => {
     const container = document.getElementById(containerId);
     if (!container || typeof vis === 'undefined') {
       if (container) container.innerHTML = '<div class="empty">DAG viewer unavailable (vis-network CDN not reachable)</div>';
-      return;
+      dagReady = true; return;
     }
     dagNodes = new vis.DataSet(graphData.nodes.map(n => ({
       id: n.id, label: n.label || n.id,
@@ -376,11 +375,21 @@ function initDAG(containerId, graphData) {
       physics: false,
       interaction: { hover: true },
     });
+    dagReady = true;
+    // Replay buffered status updates
+    for (const s of pendingStatuses) {
+      dagNodes.update({ id: s.nodeId, color: { background: STATUS_COLORS[s.status] || '#64748b' } });
+    }
+    pendingStatuses = [];
   });
 }
 
 function updateNodeStatus(nodeId, status) {
-  if (dagNodes) dagNodes.update({ id: nodeId, color: { background: STATUS_COLORS[status] || '#64748b' } });
+  if (dagReady && dagNodes) {
+    dagNodes.update({ id: nodeId, color: { background: STATUS_COLORS[status] || '#64748b' } });
+  } else {
+    pendingStatuses.push({ nodeId, status });
+  }
 }
 
 // ── WebSocket ───────────────────────────────────────────────────

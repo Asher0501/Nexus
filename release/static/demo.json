@@ -1,0 +1,47 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "providers": [{ "type": "shell", "command": "scripts/node_ok.bat" }],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "fetch_users",
+      "providers": [{ "type": "shell", "command": "scripts/node_ok.bat" }],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "fetch_orders",
+      "providers": [{ "type": "shell", "command": "scripts/node_ok.bat" }],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "merge",
+      "providers": [{ "type": "shell", "command": "scripts/node_ok.bat" }],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "validate",
+      "providers": [{ "type": "shell", "command": "scripts/node_approved.bat" }],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "report_ok",
+      "providers": [{ "type": "shell", "command": "scripts/node_ok.bat" }],
+      "process_timeout_secs": 10
+    }
+  ],
+  "edges": [
+    { "from": "start",        "to": "fetch_users",  "trigger": "any", "event": "complete" },
+    { "from": "start",        "to": "fetch_orders", "trigger": "any", "event": "complete" },
+    { "from": "fetch_users",  "to": "merge",        "trigger": "all", "event": "complete" },
+    { "from": "fetch_orders", "to": "merge",        "trigger": "all", "event": "complete" },
+    { "from": "merge",        "to": "validate",     "trigger": "any", "event": "complete" },
+    { "from": "validate",     "to": "report_ok",    "trigger": "any", "event": "complete", "exit_reason": "approved" }
+  ],
+  "dataflows": [
+    { "from": "fetch_users",  "to": "merge" },
+    { "from": "fetch_orders", "to": "merge" },
+    { "from": "merge",        "to": "validate" }
+  ]
+}
