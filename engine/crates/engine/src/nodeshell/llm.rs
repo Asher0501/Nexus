@@ -178,13 +178,7 @@ impl LlmExecutor {
         let mut child = None;
 
         for python in python_candidates {
-            let mut cmd = if cfg!(windows) {
-                let mut c = Command::new("cmd.exe");
-                c.arg("/c").arg(python);
-                c
-            } else {
-                Command::new(*python)
-            };
+            let mut cmd = Command::new(*python);
             cmd.arg(&self.wrapper_path)
                 .arg("--cmd")
                 .arg(&rendered_cmd)
