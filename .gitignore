@@ -35,3 +35,8 @@ bak/
 **/*.dll
 **/*.so
 **/*.dylib
+release/*.md
+!release/README.md
+!release/QUICKSTART.md
+!release/WORKFLOW_REFERENCE.md
+!release/NEXUS_WORKFLOW_SKILL.md
