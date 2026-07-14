@@ -153,10 +153,12 @@ def run_cmd(cmd_str: str) -> subprocess.Popen:
 
 def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
     """Read stdout line-by-line, forward each line to stderr (engine log).
-    Returns complete stdout for final parsing. Stderr read concurrently."""
+    Returns complete stdout for final parsing. Stderr read concurrently.
+    Sends periodic heartbeats to flush pipe buffers for real-time streaming."""
     deadline = time.time() + timeout if timeout > 0 else None
     stdout_lines: list[str] = []
     stderr_done = threading.Event()
+    heartbeat_stop = threading.Event()
 
     def _read_stderr():
         try:
@@ -169,7 +171,14 @@ def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
         finally:
             stderr_done.set()
 
+    def _heartbeat():
+        while not heartbeat_stop.is_set():
+            time.sleep(0.5)
+            if not heartbeat_stop.is_set():
+                emit_stderr("")
+
     threading.Thread(target=_read_stderr, daemon=True).start()
+    threading.Thread(target=_heartbeat, daemon=True).start()
 
     try:
         for line in proc.stdout:
@@ -183,127 +192,44 @@ def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
                 break
     except Exception:
         pass
+    finally:
+        heartbeat_stop.set()
 
     stderr_done.wait(timeout=5)
     return "\n".join(stdout_lines)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Output parsing — extract route + content from any format
+# Output parsing — find route+content JSON in any output
 # ═══════════════════════════════════════════════════════════════════
 
-def extract_json(text: str) -> dict | None:
-    if not text.strip():
-        return None
-    try:
-        return json.loads(text.strip())
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r'\{[^{}]*"route"\s*:\s*"[^"]*"[^{}]*\}', text, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            pass
-    start, end = text.find("{"), text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
-
+ROUTE_RE = re.compile(
+    r'\{[^{}]*"route"\s*:\s*"([^"]*)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"[^{}]*\}',
+    re.DOTALL,
+)
 
 def parse_text_output(stdout: str) -> dict:
-    """Parse stdout into {route, content}. Handles:
-    - Claude envelope: {"type":"result","result":"{...}"}
-    - Direct JSON: {"route":"...","content":"..."}
-    - OpenCode NDJSON: {"type":"text","part":{"text":"..."}}
-    - Raw text"""
-    parsed = extract_json(stdout)
+    """Search ALL output for a JSON object with route and content fields."""
+    # 1. Try direct JSON parse (covers clean single-line output)
+    stripped = stdout.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            obj = json.loads(stripped)
+            if "route" in obj:
+                return {"route": str(obj["route"]), "content": str(obj.get("content", ""))}
+        except json.JSONDecodeError:
+            pass
 
-    # Handle JSON arrays (e.g. claude --verbose NDJSON): take last object
-    if isinstance(parsed, list):
-        parsed = parsed[-1] if parsed else {}
+    # 2. Regex: find {"route":"...","content":"..."} anywhere in the output
+    for m in ROUTE_RE.finditer(stdout):
+        try:
+            obj = json.loads(m.group(0))
+            return {"route": str(obj["route"]), "content": str(obj.get("content", ""))}
+        except json.JSONDecodeError:
+            continue
 
-    # Claude result envelope
-    if isinstance(parsed, dict) and parsed.get("type") == "result":
-        inner = parsed.get("result", "")
-        if isinstance(inner, str):
-            ip = extract_json(inner)
-            if ip and "route" in ip:
-                return {"route": str(ip["route"]), "content": str(ip.get("content", ""))}
-            return {"route": "", "content": inner}
-        return {"route": "", "content": json.dumps(parsed)}
-
-    # If global extract_json failed, try parsing each line as NDJSON
-    # (Claude --verbose outputs one JSON object per line).
-    if parsed is None:
-        for line in reversed(stdout.strip().splitlines()):
-            line = line.strip()
-            if not line: continue
-            obj = extract_json(line)
-            if not obj or not isinstance(obj, dict): continue
-            # Claude result envelope
-            if obj.get("type") == "result":
-                inner = obj.get("result", "")
-                if isinstance(inner, str):
-                    ip = extract_json(inner)
-                    if ip and "route" in ip:
-                        return {"route": str(ip["route"]), "content": str(ip.get("content", ""))}
-                    return {"route": "", "content": inner}
-            # Claude assistant text
-            if obj.get("type") == "assistant":
-                msg = obj.get("message", {})
-                content = msg.get("content", [])
-                if isinstance(content, list):
-                    for c in reversed(content):
-                        if isinstance(c, dict) and c.get("type") == "text":
-                            txt = c.get("text", "")
-                            ip = extract_json(txt)
-                            if ip and "route" in ip:
-                                return {"route": str(ip["route"]), "content": str(ip.get("content", ""))}
-                            # Last text output as fallback content
-                            return {"route": "", "content": txt}
-        # If we got here, try to extract route from raw text with regex
-        m = re.search(r'\{[^{}]*"route"\s*:\s*"([^"]*)"[^{}]*\}', stdout)
-        if m:
-            try:
-                obj = json.loads(m.group(0))
-                return {"route": str(obj.get("route", "")), "content": str(obj.get("content", ""))}
-            except json.JSONDecodeError:
-                pass
-
-    # Direct JSON
-    if parsed and "route" in parsed:
-        return {"route": str(parsed["route"]), "content": str(parsed.get("content", ""))}
-
-    # Alternative keys
-    if parsed:
-        for k in ("status", "verdict", "result", "output", "decision"):
-            if k in parsed:
-                return {"route": str(parsed[k]), "content": json.dumps(parsed)}
-        return {"route": "", "content": json.dumps(parsed)}
-
-    # OpenCode NDJSON
-    if '"type":"text"' in stdout or '"type":"step_start"' in stdout:
-        last_text = ""
-        for line in stdout.splitlines():
-            try:
-                ev = json.loads(line.strip())
-            except json.JSONDecodeError:
-                continue
-            if ev.get("type") == "text":
-                t = ev.get("part", {}).get("text", "")
-                if t:
-                    last_text = t
-        if last_text:
-            inner = extract_json(last_text)
-            if inner and "route" in inner:
-                return {"route": str(inner["route"]), "content": str(inner.get("content", ""))}
-            return {"route": "", "content": last_text}
-
-    return {"route": "", "content": stdout.strip()}
+    # 3. Fallback: no route found
+    return {"route": "", "content": stripped}
 
 
 # ═══════════════════════════════════════════════════════════════════

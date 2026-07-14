@@ -1,8 +1,8 @@
 {
   "nodes": [
     {
-      "id": "start",
-      "providers": [{ "type": "shell", "command": "scripts/start_review.bat" }],
+      "id": "seed",
+      "providers": [{ "type": "shell", "command": "python scripts/read_arch.py" }],
       "process_timeout_secs": 10
     },
     {
@@ -10,40 +10,38 @@
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are a design critic (Round {{metadata.run_count}}/3). Review this document for: 1) consistent abstraction altitude, 2) non-obvious value per claim, 3) logical gaps.\n\nDocument:\n{{inputs.start}}\n\nPrevious fix:\n{{inputs.fix}}\n\nIf issues found: route='needs_fix'. All good: route='done'.\nOutput ONLY: {\"route\":\"needs_fix|done\",\"content\":\"## Round {{metadata.run_count}}\\n...\"}",
-        "routes": ["needs_fix", "done"]
+        "prompt": "Round {{metadata.run_count}}/2. Critique this architecture doc for abstraction consistency, design rationale, and logical gaps. Last fix: {{inputs.fix}}. Issues → route='again'. Done → route='stop'. Doc: {{inputs.seed}}. Output ONLY JSON with route field. Write review to review.md.",
+        "routes": ["again", "stop"]
       }],
-      "process_timeout_secs": 180,
-      "route_policy": { "type": "max_runs", "max": 3, "then_route": "done" }
+      "process_timeout_secs": 300,
+      "route_policy": { "type": "max_runs", "max": 2, "then_route": "stop" }
     },
     {
       "id": "fix",
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are a design editor. Rewrite sections based on review.\n\nReview:\n{{inputs.review}}\n\nOriginal:\n{{inputs.start}}\n\nOutput ONLY: {\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\\n...\"}",
-        "routes": ["fixed"]
+        "prompt": "Rewrite problematic sections based on review. Review: {{inputs.review}}. Original doc: {{inputs.seed}}. Output ONLY JSON with route='done'. Write fixes to fix.md.",
+        "routes": ["done"]
       }],
-      "process_timeout_secs": 180
+      "process_timeout_secs": 300
     },
     {
-      "id": "report",
+      "id": "exit",
       "providers": [{ "type": "shell", "command": "scripts/node_ok.bat" }],
       "process_timeout_secs": 10
     }
   ],
   "edges": [
-    { "from": "start",  "to": "review", "trigger": "any", "event": "complete" },
-    { "from": "review", "to": "fix",    "trigger": "any", "event": "complete", "exit_reason": "needs_fix" },
+    { "from": "seed",   "to": "review", "trigger": "any", "event": "complete" },
+    { "from": "review", "to": "fix",    "trigger": "any", "event": "complete", "exit_reason": "again" },
     { "from": "fix",    "to": "review", "trigger": "any", "event": "complete" },
-    { "from": "review", "to": "report", "trigger": "any", "event": "complete", "exit_reason": "done" }
+    { "from": "review", "to": "exit",   "trigger": "any", "event": "complete", "exit_reason": "stop" }
   ],
   "dataflows": [
-    { "from": "start",  "to": "review" },
-    { "from": "start",  "to": "fix" },
+    { "from": "seed",   "to": "review" },
+    { "from": "seed",   "to": "fix" },
     { "from": "fix",    "to": "review" },
-    { "from": "review", "to": "fix" },
-    { "from": "review", "to": "report" },
-    { "from": "fix",    "to": "report" }
+    { "from": "review", "to": "fix" }
   ]
 }
