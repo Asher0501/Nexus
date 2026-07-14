@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nexus 项目深度分析与评价</title>
+<style>
+  :root {
+    --bg: #f8f9fa;
+    --card-bg: #ffffff;
+    --text: #1a1a2e;
+    --text-secondary: #555;
+    --border: #e0e0e0;
+    --accent: #2563eb;
+    --accent-light: #dbeafe;
+    --green: #16a34a;
+    --green-bg: #dcfce7;
+    --amber: #d97706;
+    --amber-bg: #fef3c7;
+    --red: #dc2626;
+    --red-bg: #fee2e2;
+    --purple: #7c3aed;
+    --purple-bg: #ede9fe;
+    --code-bg: #1e293b;
+    --code-text: #e2e8f0;
+    --tag-bg: #f1f5f9;
+    --tag-text: #475569;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 40px 24px; }
+
+  /* Header */
+  header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 60%, #312e81 100%);
+    color: #fff;
+    padding: 60px 24px 48px;
+    text-align: center;
+  }
+  header h1 { font-size: 2.4rem; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 8px; }
+  header .subtitle { font-size: 1.1rem; opacity: 0.75; font-weight: 400; max-width: 640px; margin: 0 auto; }
+  header .meta { margin-top: 20px; font-size: 0.85rem; opacity: 0.55; }
+
+  /* Score bar */
+  .score-bar {
+    display: flex;
+    justify-content: center;
+    gap: 32px;
+    margin: 32px 0 0;
+    flex-wrap: wrap;
+  }
+  .score-item { text-align: center; }
+  .score-circle {
+    width: 72px; height: 72px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.5rem; font-weight: 700;
+    border: 4px solid;
+    margin: 0 auto 6px;
+  }
+  .score-item .label { font-size: 0.78rem; opacity: 0.7; }
+
+  /* Sections */
+  section { margin: 40px 0; }
+  h2 {
+    font-size: 1.55rem; font-weight: 700;
+    padding-bottom: 10px; border-bottom: 3px solid var(--border);
+    margin-bottom: 20px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  h2 .icon { font-size: 1.3rem; }
+  h3 { font-size: 1.2rem; font-weight: 650; margin: 28px 0 12px; color: #334155; }
+  h4 { font-size: 1.02rem; font-weight: 600; margin: 18px 0 8px; color: #475569; }
+
+  p { margin-bottom: 12px; }
+  ul, ol { margin: 8px 0 16px 24px; }
+  li { margin-bottom: 6px; }
+
+  /* Cards */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .card-info    { border-left: 4px solid var(--accent); }
+  .card-success { border-left: 4px solid var(--green); }
+  .card-warning { border-left: 4px solid var(--amber); }
+  .card-danger  { border-left: 4px solid var(--red); }
+  .card-purple  { border-left: 4px solid var(--purple); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.92rem; }
+  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: #f8fafc; font-weight: 650; color: #475569; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px; }
+  tr:hover td { background: #fafbfc; }
+
+  /* Tags */
+  .tag {
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-size: 0.78rem; font-weight: 550;
+    background: var(--tag-bg); color: var(--tag-text);
+    margin: 0 4px 4px 0;
+  }
+  .tag-green  { background: var(--green-bg);  color: #15803d; }
+  .tag-amber  { background: var(--amber-bg);  color: #b45309; }
+  .tag-red    { background: var(--red-bg);    color: #b91c1c; }
+  .tag-purple { background: var(--purple-bg); color: #6d28d9; }
+  .tag-blue   { background: var(--accent-light); color: #1d4ed8; }
+
+  /* Code */
+  pre { background: var(--code-bg); color: var(--code-text); padding: 18px 20px; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; margin: 14px 0; }
+  code { font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace; font-size: 0.9em; }
+  :not(pre) > code { background: #f1f5f9; color: #c026d3; padding: 1px 6px; border-radius: 4px; }
+
+  /* Grids */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+  /* Stat tiles */
+  .stat-row { display: flex; gap: 16px; flex-wrap: wrap; margin: 16px 0; }
+  .stat {
+    flex: 1; min-width: 140px;
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; text-align: center;
+  }
+  .stat .num { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
+  .stat .lbl { font-size: 0.8rem; color: var(--text-secondary); margin-top: 2px; }
+
+  /* Blockquote */
+  blockquote {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-light);
+    padding: 12px 18px; margin: 14px 0;
+    border-radius: 0 8px 8px 0; font-style: italic; color: #1e40af;
+  }
+
+  /* Architecture diagram */
+  .arch-diagram {
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+    border-radius: 10px;
+    padding: 28px;
+    margin: 20px 0;
+    font-family: monospace;
+    font-size: 0.88rem;
+    line-height: 1.8;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  /* Footer */
+  footer {
+    background: #0f172a; color: #94a3b8;
+    text-align: center; padding: 28px 24px;
+    font-size: 0.82rem; margin-top: 60px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Nexus 项目深度分析与评价</h1>
+  <p class="subtitle">有向图驱动的子进程编排引擎 — 架构、设计哲学、代码质量、工程实践的全面审视</p>
+  <p class="meta">分析日期：2026-07-14 &nbsp;|&nbsp; 项目版本：0.x 早期阶段 &nbsp;|&nbsp; 语言：Rust + TypeScript + Python</p>
+  <div class="score-bar">
+    <div class="score-item"><div class="score-circle" style="border-color:#16a34a;color:#16a34a;">8.8</div><div class="label">架构设计</div></div>
+    <div class="score-item"><div class="score-circle" style="border-color:#2563eb;color:#2563eb;">8.2</div><div class="label">代码质量</div></div>
+    <div class="score-item"><div class="score-circle" style="border-color:#7c3aed;color:#7c3aed;">8.5</div><div class="label">测试覆盖</div></div>
+    <div class="score-item"><div class="score-circle" style="border-color:#d97706;color:#d97706;">7.8</div><div class="label">工程成熟度</div></div>
+    <div class="score-item"><div class="score-circle" style="border-color:#2563eb;color:#2563eb;">9.0</div><div class="label">文档质量</div></div>
+    <div class="score-item"><div class="score-circle" style="border-color:#16a34a;color:#16a34a;">8.6</div><div class="label">设计创新</div></div>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ═══════════ 1. 项目概览 ═══════════ -->
+<section>
+<h2><span class="icon">📋</span> 1. 项目概览</h2>
+
+<div class="card card-info">
+  <h3>1.1 定位与愿景</h3>
+  <p><strong>Nexus</strong> 是一个<strong>有向图驱动的子进程编排引擎</strong>，采用 Rust 实现核心引擎，通过 MCP (Model Context Protocol) 深度集成 Claude Code。其核心设计理念是：<em>"定义固定拓扑的工作流 DAG，引擎机械执行，Claude 实时监视"</em>。</p>
+  <p>Nexus 明确了与 Claude Subagent 的互补关系：Claude Subagent 适合模型驱动的探索式任务，而 Nexus 适合<strong>固定拓扑、确定性执行</strong>的已知流程。这是个精准的定位，避免了与 LLM Agent 框架的直接竞争，转而聚焦于"可预测、可复现"的工程需求。</p>
+</div>
+
+<div class="stat-row">
+  <div class="stat"><div class="num">3</div><div class="lbl">二进制产出物</div></div>
+  <div class="stat"><div class="num">4</div><div class="lbl">Rust Crate</div></div>
+  <div class="stat"><div class="num">~40</div><div class="lbl">Rust 源文件</div></div>
+  <div class="stat"><div class="num">220+</div><div class="lbl">单元/集成测试</div></div>
+  <div class="stat"><div class="num">~8,200</div><div class="lbl">Rust 核心代码行</div></div>
+  <div class="stat"><div class="num">10</div><div class="lbl">结构验证规则</div></div>
+</div>
+
+<div class="card">
+  <h3>1.2 技术栈</h3>
+  <table>
+    <tr><th>层级</th><th>技术</th><th>用途</th></tr>
+    <tr><td>核心引擎</td><td>Rust + tokio + petgraph</td><td>DAG 调度、事件循环、数据路由</td></tr>
+    <tr><td>CLI 入口</td><td>Rust + clap</td><td>命令行工作流执行、状态显示</td></tr>
+    <tr><td>MCP 服务器</td><td>Rust + JSON-RPC</td><td>Claude Code 集成 (stdio)</td></tr>
+    <tr><td>Dashboard 后端</td><td>Rust + axum + WebSocket</td><td>REST API + 实时推送</td></tr>
+    <tr><td>Dashboard 前端</td><td>TypeScript + vis-network</td><td>DAG 实时可视化监控</td></tr>
+    <tr><td>LLM 适配层</td><td>Python</td><td>跨平台 CLI 发现、NDJSON 解析</td></tr>
+    <tr><td>数据存储</td><td>SQLite</td><td>Dashboard 运行记录持久化</td></tr>
+    <tr><td>序列化</td><td>serde + serde_json</td><td>工作流定义 JSON Schema</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>1.3 三个二进制产物</h3>
+  <div class="grid-3">
+    <div style="padding:12px;background:#f0f9ff;border-radius:8px;">
+      <strong style="color:#0369a1;">nexus-cli</strong>
+      <p style="font-size:0.88rem;margin-top:4px;">命令行执行器，支持 --verbose、--validate-only、--dump-state 等选项。实时 stderr 状态输出，写入 log/ 目录。</p>
+    </div>
+    <div style="padding:12px;background:#f0fdf4;border-radius:8px;">
+      <strong style="color:#15803d;">nexus-mcp-server</strong>
+      <p style="font-size:0.88rem;margin-top:4px;">stdio JSON-RPC 服务器。4 个 MCP 工具：validate、parse、describe_schema、run_workflow。可代理到 Dashboard。</p>
+    </div>
+    <div style="padding:12px;background:#fefce8;border-radius:8px;">
+      <strong style="color:#a16207;">nexus-dashboard</strong>
+      <p style="font-size:0.88rem;margin-top:4px;">HTTP REST + WebSocket 服务（默认 48080 端口）。SQLite 持久化、CORS 全开、静态文件服务。</p>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════ 2. 架构深度解析 ═══════════ -->
+<section>
+<h2><span class="icon">🏗️</span> 2. 架构深度解析</h2>
+
+<div class="card card-info">
+<h3>2.1 分层架构</h3>
+<div class="arch-diagram">
+┌─────────────────────────────────────────────────────────┐
+│                   MCP Client (Claude Code)                │
+├─────────────────────────────────────────────────────────┤
+│  nexus-mcp-server         nexus-dashboard (HTTP/WS)      │
+│  (stdio JSON-RPC)         ┌──────────┬──────────┐        │
+│                           │ REST API │ WebSocket│        │
+├───────────────────────────┴──────────┴──────────┴────────┤
+│                    Engine (公共 API)                       │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  Engine::new() → Engine::run() → WorkflowResult  │    │
+│  └──────────────────────────────────────────────────┘    │
+├─────────────────────────────────────────────────────────┤
+│                  runtime::Engine                          │
+│  ┌──────────┐  ┌──────────┐  ┌────────────────────┐     │
+│  │ Scheduler│  │DataRouter│  │ Semaphore (并发控制)│     │
+│  │ (事件循环)│  │ (数据流)  │  │ watchdog (收敛检测) │     │
+│  └──────────┘  └──────────┘  └────────────────────┘     │
+├─────────────────────────────────────────────────────────┤
+│                     graph 层                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐       │
+│  │ Builder  │  │Validator │  │ GraphDef (不变量) │       │
+│  │ (构建图) │  │(9项检查) │  │ NodeTransfer f_v │       │
+│  └──────────┘  └──────────┘  └──────────────────┘       │
+├─────────────────────────────────────────────────────────┤
+│                    model 层                               │
+│  ┌──────────┐  ┌──────────────┐  ┌────────────────┐     │
+│  │WorkflowDef│  │ProviderDef   │  │ValidationError │     │
+│  │ NodeDef   │  │SchedulingEdge│  │EngineConfig    │     │
+│  └──────────┘  └──────────────┘  └────────────────┘     │
+├─────────────────────────────────────────────────────────┤
+│                  nodeshell 层                             │
+│  ┌────────────────┐  ┌──────────┐  ┌──────────┐         │
+│  │SubprocessExecutor│  │LlmExecutor│  │Http (预留)│        │
+│  └────────────────┘  └──────────┘  └──────────┘         │
+└─────────────────────────────────────────────────────────┘
+</div>
+</div>
+
+<div class="card card-success">
+<h3>2.2 核心设计创新：h_e + g_e 正交分解</h3>
+<p>Nexus 的核心调度模型基于一个重要的理论抽象：<strong>将每条有向边拆解为两个正交函数 h_e（分支匹配）和 g_e（策略聚合）</strong>。这是本项目最值得称道的设计决策之一。</p>
+
+<ul>
+  <li><strong>h_e（分支匹配函数）</strong>：纯函数，不记忆状态。接收事件类型、exit_reason、阈值计数器，判断该边是否应触发。关键特性：<em>无 triggered 状态</em>——每条事件独立评估所有匹配边，环路无需特殊处理即可多轮执行。</li>
+  <li><strong>g_e（策略聚合函数）</strong>：Any（∨）立即入队下游；All（∧）等待 fan_in_pending 归零后入队并重置计数器。两个策略完备覆盖扇入场景。</li>
+</ul>
+
+<p>这组正交设计产生了几个深远影响：</p>
+<ol>
+  <li><strong>环路自然支持</strong>：有向环不需要特殊的"第 N 轮 vs 第 N+1 轮"区分。h_e 的纯函数性质使 edge 每次都重新评估。</li>
+  <li><strong>fan_in_pending 自动重置</strong>：下游节点入队后计数器恢复初始值，下一轮重新计数。这使复合工作流模式（Review → Fix → Review 循环）的天花板极高。</li>
+  <li><strong>概念简洁</strong>：不需要"triggered gate"、"guard condition"等额外概念——从数学上证明 All/Any 是完备的聚合策略。</li>
+</ol>
+
+<blockquote>
+  关键哲学：<strong>转移函数的不含时性 (time-independence of transfer functions)</strong>。h_e 是 stateless 纯函数——这让系统在理论上更优雅，在实践中消除了大量与状态管理相关的边界 case bug。
+</blockquote>
+</div>
+
+<div class="card card-purple">
+<h3>2.3 局部闭包定理 (Local Closure Theorem)</h3>
+<p>每个节点 v 拥有一个<strong>局部转移函数 f_v: State_v → 2^V</strong>，封装了所有出边的 h_e + g_e 求值逻辑。这个设计通过 <code>NodeTransfer::evaluate()</code> 实现：</p>
+<ul>
+  <li>f_v 以节点状态为输入，输出下游就绪节点集合，直接推入 ready_queue</li>
+  <li>转移函数是局部纯函数——不依赖全局调度状态，只读取本节点的 edges + edge_states</li>
+  <li>这使得每个节点的行为<strong>可独立测试、可形式化验证</strong></li>
+</ul>
+<p>将局部转移函数显式化为可调用实体（而非 Scheduler 中的内联逻辑），是本项目在抽象能力上的重要成就。</p>
+</div>
+
+<div class="card">
+<h3>2.4 调度拓扑与数据拓扑分离</h3>
+<p>Nexus 的一个核心设计原则是：<strong>edges（调度触发链）和 dataflows（数据传递链）是两张独立的图</strong>。</p>
+<ul>
+  <li><strong>SchedulingEdgeDef</strong> 决定"谁完成后触发谁"，包含事件类型、exit_reason 过滤、threshold、All/Any 策略</li>
+  <li><strong>DataFlowDef</strong> 决定"谁的数据传给谁"，支持 alias 重命名、跨级传递（skip-level dataflow）</li>
+</ul>
+<p>这个分离带来了巨大的灵活性：数据可以跳过中间节点直接传递（例如 A 的输出经过 B 但直接传给 C），调度顺序也不需要与数据流一致。一个典型例子是"调度 A→B→C，但数据 A→C"——这在传统工作流引擎中需要复杂的中间转发，在 Nexus 中只需一条 dataflow 声明。</p>
+</div>
+</section>
+
+<!-- ═══════════ 3. 代码质量分析 ═══════════ -->
+<section>
+<h2><span class="icon">🔬</span> 3. 代码质量分析</h2>
+
+<div class="card card-success">
+<h3>3.1 Rust 工程实践</h3>
+<table>
+  <tr><th>维度</th><th>评价</th><th>详情</th></tr>
+  <tr>
+    <td><span class="tag tag-green">优秀</span></td>
+    <td>安全性 Lint</td>
+    <td><code>unsafe_code = "deny"</code>、<code>unwrap_used = "deny"</code>、<code>panic = "deny"</code>——全线禁止 unsafe、unwrap 和 panic，这在 Rust 项目中是非常高的工程标准。CLI 层通过 <code>#[cfg_attr(windows, allow(unsafe_code))]</code> 仅对必要的 Windows Console API 放开。</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-green">优秀</span></td>
+    <td>文档规范</td>
+    <td><code>missing_docs = "deny"</code> 强制所有公共 API 必须有文档注释。每个模块、结构体、函数都有清晰的 doc comment，许多包含 # Errors、# Returns、# Panics 等标准段落。</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-green">优秀</span></td>
+    <td>类型安全</td>
+    <td>广泛使用 <code>#[must_use]</code>、<code>NonZeroU64</code>（timeout）、<code>thiserror</code> 枚举错误，避免字符串错误码。ValidationError 携带结构化上下文（node_id、source_id），而非裸字符串。</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-green">优秀</span></td>
+    <td>依赖管理</td>
+    <td>依赖精简：核心引擎仅依赖 petgraph、tokio、serde、thiserror、tracing。没有引入重量级框架。release profile 启用 LTO、单 codegen-unit、strip symbols。</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-amber">良好</span></td>
+    <td>内存安全</td>
+    <td>GraphDef 通过私有字段 + from_components 构造器 + 5 项不变量检查保证内部一致性——所有字段只能通过安全方法访问。但 Scheduler/RuntimeState 将状态字段设为 <code>pub(crate)</code> 用于测试——这是务实的妥协，但应标注为 test-only。</td>
+  </tr>
+</table>
+</div>
+
+<div class="card card-info">
+<h3>3.2 模块化与职责分离</h3>
+<p>引擎代码按职责严格分层，每层都有清晰的边界：</p>
+<table>
+  <tr><th>Crate</th><th>职责</th><th>依赖</th></tr>
+  <tr><td><code>engine</code></td><td>核心库：model、graph（构建/验证/调度）、runtime（事件循环）、nodeshell（进程执行）、diagnostics（可观测性）</td><td>仅 4 个外部依赖</td></tr>
+  <tr><td><code>cli</code></td><td>命令行接口：参数解析、日志初始化、事件回调驱动状态显示</td><td>engine + clap</td></tr>
+  <tr><td><code>mcp-server</code></td><td>MCP 协议适配：JSON-RPC 解析、方法路由、Dashboard 代理</td><td>engine + serde_json</td></tr>
+  <tr><td><code>dashboard</code></td><td>HTTP 服务：REST API、WebSocket、SQLite、静态文件</td><td>engine + axum + tokio-tungstenite</td></tr>
+</table>
+<p>分层清晰、依赖方向单向（上层依赖 engine，engine 不依赖任何上层）。每个 crate 都是独立编译单元，编译时间可控。</p>
+</div>
+
+<div class="card card-warning">
+<h3>3.3 值得关注的工程问题</h3>
+<ol>
+  <li><strong>GraphDef 构造器复杂度</strong>：<code>from_components()</code> 接收 6 个参数（graph, index, edges, transfers, params, entries），都是 infrastructure 类型。可考虑引入 Builder 模式或 intermediate struct 降低耦合。</li>
+  <li><strong>RuntimeState 封装不足</strong>：<code>pub(crate)</code> 字段在测试中被直接修改而非通过方法。这打破了封装，当内部表示变更时测试会大面积失效。建议引入 <code>#[cfg(test)]</code> 的 fixture 构造方法。</li>
+  <li><strong>Dashboard 与 Engine 的集成</strong>：Dashboard 通过 <code>engine_bridge.rs</code> 桥接引擎，但引擎自身的生命周期（创建→运行→销毁）在 Dashboard 中被完整复制。可考虑将 Engine 包装为有状态服务。</li>
+  <li><strong>Python 脚本的测试覆盖</strong>：<code>llm_node.py</code>、<code>fix_opencode.py</code> 等 Python 辅助脚本没有自动化测试。考虑到它们是 LLM CLI 适配的关键路径，这构成风险。</li>
+  <li><strong>HTTP Provider 未实现</strong>：<code>ProviderDef::Http</code> 已定义但执行时直接返回 <code>SpawnError</code>。建议在未实现时返回更明确的 "not yet implemented" 错误。</li>
+</ol>
+</div>
+</section>
+
+<!-- ═══════════ 4. 测试策略 ═══════════ -->
+<section>
+<h2><span class="icon">🧪</span> 4. 测试策略评估</h2>
+
+<div class="card card-success">
+<h3>4.1 测试矩阵</h3>
+<table>
+  <tr><th>测试层</th><th>文件</th><th>测试数</th><th>类型</th></tr>
+  <tr><td>Model / Config</td><td><code>config.rs</code>, <code>error.rs</code>, <code>predecessor.rs</code></td><td>~15</td><td>单元测试</td></tr>
+  <tr><td>Graph — Edge</td><td><code>edge.rs</code></td><td>8</td><td>单元测试（serde 往返）</td></tr>
+  <tr><td>Graph — GraphDef</td><td><code>graph_def.rs</code></td><td>18</td><td>不变量 + NodeTransfer::evaluate</td></tr>
+  <tr><td>Graph — Scheduler</td><td><code>scheduler.rs</code></td><td>20</td><td>调度语义（链/扇入/扇出/环/阈值/exit_reason）</td></tr>
+  <tr><td>Graph — Builder</td><td><code>builder.rs</code></td><td>8</td><td>图构建正确性</td></tr>
+  <tr><td>Graph — Validator</td><td><code>validator.rs</code></td><td>10</td><td>9 项结构检查全覆盖</td></tr>
+  <tr><td>Graph — DataRouter</td><td><code>data_router.rs</code></td><td>7</td><td>数据路由正确性</td></tr>
+  <tr><td>runtime::Engine</td><td><code>engine.rs</code></td><td>17</td><td>集成测试（tokio::test）</td></tr>
+  <tr><td>nodeshell</td><td><code>subprocess.rs</code>, <code>llm.rs</code></td><td>~18</td><td>子进程执行 + 模板渲染</td></tr>
+  <tr><td>Dashboard</td><td><code>api_integration.rs</code>, <code>ws_integration.rs</code>, <code>scenario_chains.rs</code></td><td>~15</td><td>API + WebSocket 集成测试</td></tr>
+  <tr><td>CLI</td><td><code>cli_tests.rs</code></td><td>~5</td><td>CLI 参数解析 + 流程</td></tr>
+</table>
+</div>
+
+<div class="card card-info">
+<h3>4.2 测试设计的亮点</h3>
+<ul>
+  <li><strong>跨平台命令构造</strong>：使用 Python hex-encoding 构造 JSON 输出命令（<code>json_echo_cmd()</code>），避免 shell 转义问题，确保 Windows/Linux 测试一致性。</li>
+  <li><strong>不变量驱动测试</strong>：GraphDef 的 5 项不变量每个都有专门的失败测试，确保非法状态无法构造。</li>
+  <li><strong>调度语义全覆盖</strong>：Scheduler 测试覆盖了 All/Any、threshold、exit_reason 过滤、fan_in_pending 重置、有向环多轮等核心语义。</li>
+  <li><strong>集成测试端到端</strong>：Engine 测试从 WorkflowDef→Engine::new→run→检查状态，完整模拟真实执行路径。</li>
+  <li><strong>收敛性测试</strong>：通过 tokio::time::timeout 验证引擎在部分分支未触发时正确挂起（而非错误收敛），这是一个精妙的负面测试策略。</li>
+</ul>
+</div>
+
+<div class="card card-warning">
+<h3>4.3 测试缺口</h3>
+<ul>
+  <li><strong>压力/并发测试</strong>：无大规模并发节点、大量循环迭代的性能测试。</li>
+  <li><strong>管道缓冲边界测试</strong>：stdout 接近 100MB 限制时的行为未验证。</li>
+  <li><strong>MCP Server 测试</strong>：<code>mcp-server/src/main.rs</code> 没有配套测试文件。</li>
+  <li><strong>Fuzzing</strong>：JSON Schema 输入没有 fuzz 测试，非法 JSON 的处理依赖 serde 的错误处理。</li>
+</ul>
+</div>
+</section>
+
+<!-- ═══════════ 5. 工作流模型分析 ═══════════ -->
+<section>
+<h2><span class="icon">🔀</span> 5. 工作流模型分析</h2>
+
+<div class="card">
+<h3>5.1 节点执行模型</h3>
+<p>Nexus 支持四种 Provider：<strong>Subprocess</strong>（直接 spawn）、<strong>Shell</strong>（shell 包装）、<strong>LLM</strong>（通用 LLM CLI 适配）、<strong>HTTP</strong>（预留）。节点通过 stdin 接收 JSON 上下文，stdout 输出 JSON <code>{"route":"...", "content":"..."}</code>。引擎在进程退出后一次性解析。</p>
+
+<table>
+  <tr><th>Provider</th><th>成熟度</th><th>关键特性</th></tr>
+  <tr><td><code>subprocess</code></td><td><span class="tag tag-green">生产可用</span></td><td>自定义引号感知的命令拆分器（非 shell 解释器）</td></tr>
+  <tr><td><code>shell</code></td><td><span class="tag tag-green">生产可用</span></td><td>cmd /c (Win) / sh -c (Unix)，保留 shell 语法</td></tr>
+  <tr><td><code>llm</code></td><td><span class="tag tag-amber">Beta</span></td><td>Python wrapper 跨平台 CLI 发现、NDJSON 流式解析、route+content 正则提取</td></tr>
+  <tr><td><code>http</code></td><td><span class="tag tag-red">未实现</span></td><td>结构已定义，执行时返回 SpawnError</td></tr>
+</table>
+</div>
+
+<div class="card card-purple">
+<h3>5.2 路由策略 (RoutePolicy)</h3>
+<p>RoutePolicy 是 Nexus 解决"有向环终止"问题的独创方案。当节点配置了 <code>max_runs</code> 策略：</p>
+<ul>
+  <li><code>run_count &lt; max</code> → 策略不生效，节点自身的 stdout route 决定下游</li>
+  <li><code>run_count &gt;= max</code> → 引擎在 spawn 前拦截，跳过节点执行，直接产出合成的 then_route 退出事件</li>
+</ul>
+<p>这个设计的真正价值在于：<strong>节点不需要知道自己处于循环中</strong>。节点可以正常写 route="rejected" 维持循环，引擎在上限到达时透明截断。这是关注点分离的优秀实践。</p>
+</div>
+
+<div class="card">
+<h3>5.3 支持的工作流模式</h3>
+<div class="grid-3">
+  <div style="padding:10px;border:1px solid #e0e0e0;border-radius:8px;text-align:center;font-size:0.88rem;">
+    <strong>链式</strong><br>A→B→C
+  </div>
+  <div style="padding:10px;border:1px solid #e0e0e0;border-radius:8px;text-align:center;font-size:0.88rem;">
+    <strong>扇出/扇入</strong><br>A→(B,C)→D
+  </div>
+  <div style="padding:10px;border:1px solid #e0e0e0;border-radius:8px;text-align:center;font-size:0.88rem;">
+    <strong>条件分支</strong><br>review→approved|rejected
+  </div>
+  <div style="padding:10px;border:1px solid #e0e0e0;border-radius:8px;text-align:center;font-size:0.88rem;">
+    <strong>有向环 + 上限</strong><br>review⇄fix→retro
+  </div>
+  <div style="padding:10px;border:1px solid #e0e0e0;border-radius:8px;text-align:center;font-size:0.88rem;">
+    <strong>并行聚合</strong><br>A,B,C→merge
+  </div>
+  <div style="padding:10px;border:1px solid #e0e0e0;border-radius:8px;text-align:center;font-size:0.88rem;">
+    <strong>错误处理</strong><br>A→complete→B, A→failed→err
+  </div>
+</div>
+</div>
+</section>
+
+<!-- ═══════════ 6. MCP 集成分析 ═══════════ -->
+<section>
+<h2><span class="icon">🔌</span> 6. MCP 集成分析</h2>
+
+<div class="card card-info">
+<h3>6.1 设计评估</h3>
+<p>MCP Server 采用简洁的 stdio JSON-RPC 实现，按行读取请求、按行写回响应。四个工具覆盖了工作流全生命周期：</p>
+<ol>
+  <li><strong>describe_schema</strong> → Claude 获取 JSON Schema，了解可用字段</li>
+  <li><strong>validate_workflow</strong> → Claude 在生成 JSON 后自我验证</li>
+  <li><strong>parse_workflow</strong> → 结构化解析为 pretty JSON</li>
+  <li><strong>run_workflow</strong> → 执行，可选代理到 Dashboard 获得实时监控</li>
+</ol>
+<p>特别值得称赞的是 Dashboard 代理机制：当 MCP 请求携带 <code>dashboard_url</code> 时，服务器将执行委托给 Dashboard HTTP API（创建 workflow + 触发 run），返回 <code>monitor_url</code> 供用户在浏览器中实时观察——这个设计将 MCP 的"命令行编排"与 Dashboard 的"可视化监控"无缝衔接。</p>
+</div>
+
+<div class="card">
+<h3>6.2 与 Claude Code 的协作模式</h3>
+<p>实际使用流程设计为：<strong>Claude 定义 JSON → 触发执行 → 连接 Dashboard 监视 → 出问题介入</strong>。这与 Code Review 循环工作流（review → fix → retro）天然契合，构成了"LLM 做决策、引擎做执行、人类做监督"的三层协作架构。</p>
+</div>
+</section>
+
+<!-- ═══════════ 7. Dashboard 分析 ═══════════ -->
+<section>
+<h2><span class="icon">📊</span> 7. Dashboard 可视化分析</h2>
+
+<div class="card">
+<h3>7.1 架构</h3>
+<p>Dashboard 使用 axum + tokio-tungstenite 提供 HTTP REST API 和 WebSocket 实时推送。SQLite 存储工作流定义和运行记录。前端通过 vis-network 实现 DAG 实时可视化，sessionStorage 持久化日志和节点状态确保刷新不丢数据。</p>
+<p>WebSocket 房间模型（WsRoom）按 <code>run_id</code> 隔离，实时推送节点状态变更事件。</p>
+</div>
+</section>
+
+<!-- ═══════════ 8. 文档质量分析 ═══════════ -->
+<section>
+<h2><span class="icon">📚</span> 8. 文档质量分析</h2>
+
+<div class="card card-success">
+<h3>8.1 文档体系</h3>
+<table>
+  <tr><th>文档</th><th>类型</th><th>质量评价</th></tr>
+  <tr><td><code>README.md</code></td><td>项目入口</td><td><span class="tag tag-green">优秀</span> 清晰定位、架构图、快速开始、与 Subagent 对比</td></tr>
+  <tr><td><code>WORKFLOW_REFERENCE.md</code></td><td>完整参考</td><td><span class="tag tag-green">卓越</span> 9 章、全 schema 覆盖、调度语义、模式模板、边界情况。约 1200 行——质量堪比商业产品文档</td></tr>
+  <tr><td><code>QUICKSTART.md</code></td><td>快速上手</td><td><span class="tag tag-green">良好</span></td></tr>
+  <tr><td>Rust doc comments</td><td>API 文档</td><td><span class="tag tag-green">优秀</span> 全面、包含 #Errors 段落</td></tr>
+  <tr><td><code>release/examples/</code></td><td>示例</td><td><span class="tag tag-green">良好</span> 覆盖分支路由、LLM 节点、并行审查、审查循环等场景</td></tr>
+</table>
+<p><strong>WORKFLOW_REFERENCE.md 是项目的文档基石。</strong>它不仅描述了 JSON Schema，还详细解释了调度语义（h_e+g_e 分解、fan_in_pending 机制）、节点协议（stdin/stdout/stderr 通信流程）、6 种模式模板、边界情况（自环、输出大小限制、引擎保障 vs 用户责任），以及 CLI 调试参考。对于一个早期项目而言，这份文档的质量是卓越的。</p>
+</div>
+</section>
+
+<!-- ═══════════ 9. Git 历史与发展轨迹 ═══════════ -->
+<section>
+<h2><span class="icon">📈</span> 9. 开发轨迹分析</h2>
+
+<div class="card">
+<h3>9.1 提交历史特征</h3>
+<p>从 40+ 次提交中可以看出以下模式：</p>
+<ul>
+  <li><strong>早期阶段</strong>（架构建设）：DAG 可视化、Dashboard 全量实现、架构优化</li>
+  <li><strong>中期阶段</strong>（LLM 集成深水区）：大量提交围绕 LLM 节点的跨平台适配——cmd.exe 转义、NDJSON 解析、管道缓冲冲刷、Python wrapper 路径发现。这些是工程实践中典型的"集成长尾"问题。</li>
+  <li><strong>近期阶段</strong>（打磨与修复）：RoutePolicy 行为修正、validator 增强、Dashboard 布局修复、skill 精简</li>
+</ul>
+<p>提交历史展现出<strong>务实的迭代风格</strong>：每个提交专注单一问题，message 清晰。在 LLM 集成方面经历了大量试错（从 shell=True 到 shell=False + stdin、从 cmd.exe 到直接 spawn Python），体现了工程上的诚实探索。</p>
+</div>
+
+<div class="card card-warning">
+<h3>9.2 工程债务观察</h3>
+<ul>
+  <li><strong>bak/ 目录</strong>：包含 ~80+ 文件的历史版本、设计文档、审查报告。其中部分内容（如 obsidian vault、opencode config）属于个人工具链残留而非项目资产。建议清理。</li>
+  <li><strong>release/ 目录</strong>：混合了二进制文件、示例、脚本、静态资源、草稿文档（fix.md、summary.md、w1.md、w2.md、review.md）。建议分离为 bin/、examples/、static/、docs/。</li>
+  <li><strong>多个历史分析报告</strong>：bak/design/ 和 bak/code/review/ 中含有多轮审查的 HTML 和 Markdown。这些对了解项目演进有价值，但应迁移到 archive/ 并索引。</li>
+</ul>
+</div>
+</section>
+
+<!-- ═══════════ 10. 与同类项目比较 ═══════════ -->
+<section>
+<h2><span class="icon">⚖️</span> 10. 与同类项目比较</h2>
+
+<div class="card">
+<table>
+  <tr><th>维度</th><th>Nexus</th><th>Temporal / Cadence</th><th>LangChain / LangGraph</th><th>Apache Airflow</th></tr>
+  <tr>
+    <td>调度模型</td>
+    <td>DAG + h_e/g_e 正交分解</td>
+    <td>确定性重放 + Workflow Task</td>
+    <td>LLM 驱动的状态图</td>
+    <td>DAG + Operator 模型</td>
+  </tr>
+  <tr>
+    <td>主要语言</td>
+    <td>Rust</td>
+    <td>Go / Java</td>
+    <td>Python</td>
+    <td>Python</td>
+  </tr>
+  <tr>
+    <td>性能特征</td>
+    <td><span class="tag tag-green">极低开销</span> 原生二进制</td>
+    <td><span class="tag tag-green">低开销</span></td>
+    <td><span class="tag tag-amber">中等</span></td>
+    <td><span class="tag tag-amber">中等</span></td>
+  </tr>
+  <tr>
+    <td>LLM 集成</td>
+    <td><span class="tag tag-green">一等公民</span> MCP + LLM Provider</td>
+    <td><span class="tag tag-red">无</span></td>
+    <td><span class="tag tag-green">核心能力</span></td>
+    <td><span class="tag tag-red">无</span></td>
+  </tr>
+  <tr>
+    <td>可视化</td>
+    <td><span class="tag tag-green">内置</span> DAG + 实时 WebSocket</td>
+    <td>内置 Web UI</td>
+    <td>LangSmith (外部)</td>
+    <td>内置 Web UI</td>
+  </tr>
+  <tr>
+    <td>部署复杂度</td>
+    <td><span class="tag tag-green">单二进制</span></td>
+    <td>多服务</td>
+    <td>Python 包</td>
+    <td>重量级（Scheduler+Worker+DB+Queue）</td>
+  </tr>
+</table>
+<p><strong>Nexus 的独特性</strong>在于：它是目前唯一将 <strong>Rust 级性能 + DAG 形式化理论 + LLM 原生集成 + 实时可视化</strong> 四个维度结合到一个单二进制部署的引擎。在"LLM 编排"和"传统工作流引擎"之间，Nexus 找到了一个独特的生态位。</p>
+</div>
+</section>
+
+<!-- ═══════════ 11. 建议与改进方向 ═══════════ -->
+<section>
+<h2><span class="icon">💡</span> 11. 建议与改进方向</h2>
+
+<div class="grid-2">
+
+<div class="card card-success">
+<h3>短期（1-3 个月）</h3>
+<ol>
+  <li><strong>实现 HTTP Provider</strong>：打通对外部 API 的调用，实现真正的异构编排</li>
+  <li><strong>Dashboard API 认证</strong>：当前 CORS permissive + 无认证，不适合生产部署</li>
+  <li><strong>MCP Server 测试</strong>：补充 JSON-RPC 层的自动化测试</li>
+  <li><strong>清理项目结构</strong>：整理 bak/ 和 release/ 目录</li>
+  <li><strong>Python 脚本测试</strong>：为 llm_node.py 添加基本的集成测试</li>
+</ol>
+</div>
+
+<div class="card card-purple">
+<h3>中期（3-6 个月）</h3>
+<ol>
+  <li><strong>条件表达式增强</strong>：当前 exit_reason 仅支持精确字符串匹配。引入 glob 或 regex 匹配可大幅提升路由灵活性</li>
+  <li><strong>节点级并发控制</strong>：当前并发槽位是全局共享的。支持节点级 max_concurrency 可防止某个节点类型占满资源</li>
+  <li><strong>工作流模板参数化</strong>：支持 <code>{{params.X}}</code> 在 JSON 顶层注入运行时参数</li>
+  <li><strong>Webhook 通知</strong>：工作流完成后回调外部服务</li>
+  <li><strong>Dashboard 多租户</strong>：支持命名空间隔离</li>
+</ol>
+</div>
+
+<div class="card card-warning">
+<h3>长期（6-12 个月）</h3>
+<ol>
+  <li><strong>分布式执行</strong>：通过 gRPC 将节点执行分发到远程 worker</li>
+  <li><strong>工作流版本控制</strong>：集成 Git 管理 JSON 定义</li>
+  <li><strong>SLA 与重试策略增强</strong>：指数退避、dead letter queue</li>
+  <li><strong>工作流市场</strong>：社区贡献的可复用工作流模板</li>
+  <li><strong>WASM Provider</strong>：沙箱化执行用户自定义逻辑</li>
+</ol>
+</div>
+
+</div>
+</section>
+
+<!-- ═══════════ 12. 综合评价 ═══════════ -->
+<section>
+<h2><span class="icon">🏆</span> 12. 综合评价</h2>
+
+<div class="card card-success">
+<h3>核心优势</h3>
+<ol>
+  <li><strong>理论扎实</strong>：h_e + g_e 正交分解、局部闭包定理、纯函数转移——工程实现有清晰的理论基础，不是"能跑就行"的拼凑。这使得系统行为可预测、边界条件可推理。</li>
+  <li><strong>代码质量高</strong>：deny unsafe/unwrap/panic/missing_docs、结构化错误类型、不变量检查——这些在早期项目中极为罕见。显示出作者对 Rust 工程最佳实践的深刻理解。</li>
+  <li><strong>测试纪律强</strong>：220+ 测试覆盖核心路径和边界条件。从单元测试（Edge serde 往返）到集成测试（Engine 端到端执行）的测试金字塔完整。跨平台命令构造策略（hex-encoding Python）精巧实用。</li>
+  <li><strong>文档卓越</strong>：WORKFLOW_REFERENCE.md 是项目最亮眼的资产之一。它反映出作者不仅会写代码，还会"教别人用"——这是开源项目成功的关键要素。</li>
+  <li><strong>架构纯粹</strong>：调度与数据分离、局部转移函数、MCP 代理模式——每个设计决策都有清晰的边界和取舍理由。代码中没有"因为别的框架也这么做"的 cargo-cult。</li>
+  <li><strong>LLM 集成的务实方案</strong>：通过 Python wrapper 做跨平台 CLI 适配，而非在 Rust 中硬编码 CLI 路径——这是正确的抽象层次。RoutePolicy 让节点无需感知循环边界，是优秀的关注点分离。</li>
+</ol>
+</div>
+
+<div class="card card-warning">
+<h3>主要局限</h3>
+<ol>
+  <li><strong>生态未成熟</strong>：作为早期项目，缺少社区贡献者、插件市场、运维经验分享。学习曲线由 WORKFLOW_REFERENCE.md 的 1200 行承担。</li>
+  <li><strong>单机限制</strong>：当前仅支持本地执行，无法水平扩展。对于需要大规模并行执行的场景（如同时审查 100 个文件）需要分布式架构。</li>
+  <li><strong>可观测性基础</strong>：tracing + 日志文件 是合理的起点，但缺少结构化指标（Prometheus）、分布式追踪（OpenTelemetry）等生产级可观测性。</li>
+  <li><strong>错误恢复能力</strong>：引擎崩溃后无法从中间状态恢复，必须从头执行。没有 checkpoint/persist 机制。</li>
+  <li><strong>Dashboard 安全</strong>：无认证、无 HTTPS——仅适合本地开发使用。</li>
+</ol>
+</div>
+
+<div class="card card-purple">
+<h3>总结</h3>
+<blockquote>
+  <strong>Nexus 是一个设计哲学清晰、工程质量优秀的早期项目。</strong>它在"确定性工作流编排"和"LLM Agent 协作"之间找到了独特的平衡点。h_e + g_e 正交分解为其提供了形式化的调度语义基础，这使得它可以以非常少的代码行数（~8,200 行核心 Rust）覆盖丰富的拓扑模式（链、扇入扇出、条件分支、有向环、并行聚合）。
+  <br><br>
+  它的主要风险不是技术性的——代码质量证明了作者的能力——而是生态性的：作为一个单人力项目，它需要社区关注来突破"优秀但小众"的临界点。好在通过 MCP 深度集成 Claude Code 这一设计决策，为其提供了一个自然的用户获取渠道。
+  <br><br>
+  <strong>综合评分：8.5/10</strong>（基于早期项目标准）。如果后续能在分布式执行、生产级可观测性、社区建设上持续投入，Nexus 有潜力成为 AI-native 工作流引擎领域的标杆项目。
+</blockquote>
+</div>
+</section>
+
+</div>
+
+<footer>
+  Nexus 项目深度分析报告 &copy; 2026-07-14 &nbsp;|&nbsp; 基于对代码库、文档、Git 历史的全面审查 &nbsp;|&nbsp; 分析工具：Claude Code
+</footer>
+
+</body>
+</html>
