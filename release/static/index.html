@@ -361,12 +361,10 @@ async function renderRunMonitor(runId) {
       <span>Started: ${run.started_at||'pending...'}</span>
     </div>
     <button class="btn" data-action="goto" data-hash="#/runs">← All Runs</button>
-    <div style="margin-top:16px" class="row">
-      <div class="col"><div class="card"><h2>Live DAG</h2><div id="dag-live" class="dag-container"></div></div></div>
-      <div class="col">
-        <div class="card" style="margin-bottom:12px"><h2>Node Status</h2><div id="status-panel" style="font-size:13px;max-height:180px;overflow-y:auto"><span style="color:var(--muted)">Waiting...</span></div></div>
-        <div class="card"><h2>Raw Log</h2><div id="log-panel" class="log-panel"><span style="color:var(--muted)">Waiting for events...</span></div></div>
-      </div>
+    <div class="card" style="margin-top:16px;margin-bottom:16px"><h2>Live DAG</h2><div id="dag-live" class="dag-container"></div></div>
+    <div class="row">
+      <div class="col"><div class="card"><h2>Node Status</h2><div id="status-panel" style="font-size:13px;max-height:300px;overflow-y:auto"><span style="color:var(--muted)">Waiting...</span></div></div></div>
+      <div class="col"><div class="card"><h2>Raw Log</h2><div id="log-panel" class="log-panel"><span style="color:var(--muted)">Waiting for events...</span></div></div></div>
     </div>`;
 
   renderStatusPanel();
