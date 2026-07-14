@@ -40,6 +40,16 @@ pub async fn run_workflow(
         return Err(msg.join("; "));
     }
 
+    // Ensure log directory exists
+    let _ = std::fs::create_dir_all("log");
+    let log_path = format!("log/run-{}.log", run_id);
+    let log_file = std::sync::Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open(&log_path)
+            .unwrap_or_else(|_| std::fs::File::create(&log_path).unwrap()),
+    );
+
     let room_clone = room.clone();
     let run_id_owned = run_id.to_string();
     let event_cb: NodeEventCb = Arc::new(move |event| {
@@ -56,8 +66,13 @@ pub async fn run_workflow(
             NodeEvent::NodeTimedOut { node_id } => {
                 ServerMessage::node_status(node_id, "TimedOut")
             }
-            NodeEvent::NodeChunk { node_id, text } => {
-                ServerMessage::node_chunk(node_id, text)
+            NodeEvent::NodeChunk { ref node_id, ref text } => {
+                // Persist chunk to run log file
+                use std::io::Write;
+                if let Ok(mut f) = log_file.lock() {
+                    let _ = writeln!(f, "[{node_id}] {text}");
+                }
+                ServerMessage::node_chunk(node_id.clone(), text.clone())
             }
             NodeEvent::Lifecycle(_) => return,
         };
