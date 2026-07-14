@@ -9,7 +9,7 @@
       "id": "review",
       "providers": [{
         "type": "llm",
-        "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
+        "command": "claude -p \"{{prompt}}\" --output-format json --verbose --dangerously-skip-permissions",
         "prompt": "Round {{metadata.run_count}}/2. Read ../bak/design/ARCHITECTURE.md. Critique abstraction consistency, design rationale, logical gaps. Last fix: {{inputs.fix}}. Issues → route='again'. Done → route='stop'. Output ONLY: {\"route\":\"again|stop\",\"content\":\"## Review\\n...\"}. Write review to review.md.",
         "routes": ["again", "stop"]
       }],
@@ -20,7 +20,7 @@
       "id": "fix",
       "providers": [{
         "type": "llm",
-        "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
+        "command": "claude -p \"{{prompt}}\" --output-format json --verbose --dangerously-skip-permissions",
         "prompt": "Read ../bak/design/ARCHITECTURE.md. Rewrite problematic sections based on review: {{inputs.review}}. Output ONLY: {\"route\":\"done\",\"content\":\"## Fix\\n...\"}. Write fixes to fix.md.",
         "routes": ["done"]
       }],

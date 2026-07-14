@@ -165,6 +165,14 @@ Returns `{run_id, dashboard_url, monitor_url}`.
 
 - **Exit reachable**: every node must have a path to at least one exit node (node with 0 outgoing edges). Cycles need an exit edge → signal node. Otherwise validator rejects with "exit not reachable".
 
+## LLM Command Flags
+
+Always include `--dangerously-skip-permissions` in the claude command for non-interactive workflows, otherwise file Read/Write operations will hang waiting for approval:
+
+```
+"command": "claude -p \"{{prompt}}\" --output-format json --verbose --dangerously-skip-permissions"
+```
+
 ## Common Pitfalls
 
 | Symptom | Root cause | Fix |
