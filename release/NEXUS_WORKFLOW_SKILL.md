@@ -1,184 +1,142 @@
-# Nexus Workflow JSON Generator
+# Nexus Workflow JSON Generator / Nexus 工作流 JSON 生成器
 
 Generate valid Nexus workflow JSON. Express ALL logic in the JSON — never modify the engine or `llm_node.py`.
+所有逻辑表达在 JSON 中——禁止修改引擎或 `llm_node.py`。
 
-## Reference Docs
+## Reference Docs / 参考文档
 
-- `release/WORKFLOW_REFERENCE.md` — complete schema, scheduling semantics, mode templates, edge cases (~1200 lines)
-- `release/QUICKSTART.md` — 5-minute quickstart + c2/c3/c4 demo workflows covering all features
-- `release/README.md` — API reference, system requirements, build instructions
+- `release/WORKFLOW_REFERENCE.md` — complete schema, scheduling semantics, edge cases / 完整 Schema、调度语义、边界情况
+- `release/QUICKSTART.md` — 5-min quickstart + c2/c3/c4 demo workflows / 5 分钟入门 + 示范用例
+- `release/README.md` — API reference, system requirements / API 参考、系统要求
 
-## Architecture Principle
+## Architecture / 架构
 
 ```
-JSON Workflow  ──defines──→  Engine (DAG scheduler)  ──spawns──→  Nodes (execution)
-                                                                    │
-                                              ┌─────────────────────┤
-                                              │ type: "llm"         │ type: "shell"
-                                              │ → llm_node.py       │ → cmd /c <command>
-                                              │   (pure wrapper)    │   (.bat / echo / python)
-                                              └─────────────────────┘
+JSON Workflow → Engine (DAG scheduler) → Nodes (execution)
+                  │                       ├─ type: "llm" → llm_node.py (pure glue / 纯胶水)
+                  │                       └─ type: "shell" → cmd /c <command>
 ```
 
-**Engine does**: DAG scheduling, edge matching (h_e+g_e), data routing, spawn/retry/timeout, convergence watchdog.
-**Engine does NOT**: care about what nodes do internally. Nodes are black boxes that follow the stdout JSON protocol.
+**Engine / 引擎**：DAG scheduling, edge matching (h_e+g_e), data routing, retry/timeout, convergence.
+**Engine does NOT / 引擎不管**：what nodes do internally. Nodes are black boxes following stdout JSON protocol.
 
-**llm_node.py does**: receive `--cmd`, read stdin context, spawn CLI, forward output to engine log, parse route+content, write to stdout.
-**llm_node.py does NOT**: read files, modify prompts, write files. Pure glue.
+**llm_node.py**：receive `--cmd` → read stdin context → spawn CLI → forward output to log → regex extract route+content → write stdout.
 
-**Shell nodes do**: anything — echo JSON, run .bat scripts, call Python scripts for file I/O.
+## Node Output Protocol / 节点输出协议 (NON-NEGOTIABLE / 不可协商)
 
-## Node Output Protocol (NON-NEGOTIABLE)
-
-Every node MUST output exactly one JSON object as the last line of stdout:
-
+Every node MUST output exactly one JSON on stdout:
 ```json
 {"route":"<string>","content":"<string>"}
 ```
+- `route` — non-empty → used for `exit_reason` edge matching. Empty → only matches `exit_reason: null`.
+- `content` — arbitrary text, passed downstream via dataflows.
+- Exit 0 = `complete`. Non-zero = `failed`. Killed = `timeout`.
 
-- `route`: non-empty = used for `exit_reason` edge matching. Empty = only matches `exit_reason: null` edges.
-- `content`: arbitrary text, passed to downstream nodes via dataflows.
-- Exit code 0 = `complete` event. Non-zero = `failed`. Timeout = `timeout`.
-- Invalid JSON or missing `route` → node fails, retried up to 3 times.
+## Provider Types / Provider 类型
 
-## Templates
+| Type / 类型 | When / 场景 | Notes / 备注 |
+|------|----------|---------|
+| `"llm"` | Claude/opencode/nga calls | Command is CLI flags only. Prompt via stdin. `{{inputs.X}}` auto-replaced. |
+| `"shell"` | Scripts, echo, .bat | Wrapped in `cmd /c` (Win) or `sh -c` (Unix). |
+| `"subprocess"` | Direct spawn | Avoid. Use `"shell"` instead. |
 
-### Single LLM Node
+## LLM Command Template / LLM 命令模板
+
 ```json
-{"nodes":[{"id":"ask","providers":[{"type":"llm","command":"claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions","prompt":"Your prompt. Output ONLY: {\"route\":\"ok\",\"content\":\"...\"}","routes":["ok"]}],"process_timeout_secs":120}]}
+"command": "claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions"
+```
+- Prompt goes via stdin (not `-p`) → no command-line length limit / prompt 走 stdin 无长度限制
+- `--dangerously-skip-permissions` → allow file Read/Write without interaction
+
+## Templates / 模板
+
+### Single LLM / 单节点
+```json
+{"nodes":[{"id":"ask","providers":[{"type":"llm","command":"claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions","prompt":"Output ONLY: {\"route\":\"ok\",\"content\":\"...\"}","routes":["ok"]}],"process_timeout_secs":120}]}
 ```
 
-### Chain (A→B→C)
+### Chain / 链式 (A→B→C)
 ```json
-{"edges":[
+"edges":[
   {"from":"a","to":"b","trigger":"any","event":"complete"},
   {"from":"b","to":"c","trigger":"any","event":"complete"}
-]}
+]
 ```
 
-### Fan-out / Fan-in
-`trigger: "all"` on merge node's incoming edges waits for all upstream to complete.
-Both edges AND dataflows must be declared independently.
+### Fan-out / Fan-in / 扇出扇入
+`trigger: "all"` on merge node waits for all upstream. Edges and dataflows are independent — both must be declared.
 
-### Conditional Branch
-`exit_reason` on edge matches the node's output `route` field exactly. Null exit_reason matches any route.
+### Conditional Branch / 条件分支
+`exit_reason` on edge exactly matches node output `route`. Null = matches any route.
 
-### Directed Cycle (general pattern for repeated operations)
+### Directed Cycle / 有向环 (repeated operations / 重复操作)
 
 ```json
 {
   "nodes": [
-    {
-      "id": "A",
-      "providers": [{
-        "type": "llm",
-        "command": "claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions",
-        "prompt": "Task (Round {{metadata.run_count}}/N). Input: {{inputs.seed}}. B output: {{inputs.B}}. Continue → route='again'. Done → route='stop'. Output ONLY JSON.",
-        "routes": ["again", "stop"]
-      }],
-      "route_policy": { "type": "max_runs", "max": N, "then_route": "stop" }
-    },
-    {
-      "id": "B",
-      "providers": [{
-        "type": "llm",
-        "command": "claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions",
-        "prompt": "Process iteration. A output: {{inputs.A}}. Output ONLY JSON with route='done'.",
-        "routes": ["done"]
-      }]
-    }
+    {"id":"A","providers":[{"type":"llm","command":"claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions","prompt":"Task (Round {{metadata.run_count}}/N). Continue → route='again'. Done → route='stop'. Output ONLY JSON.","routes":["again","stop"]}],"route_policy":{"type":"max_runs","max":N,"then_route":"stop"}},
+    {"id":"B","providers":[{"type":"llm","command":"claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions","prompt":"Process iteration. Output ONLY JSON with route='done'.","routes":["done"]}]}
   ],
   "edges": [
-    { "from": "A", "to": "B", "event": "complete", "exit_reason": "again" },
-    { "from": "B", "to": "A", "event": "complete" },
-    { "from": "A", "to": "C", "event": "complete", "exit_reason": "stop" }
+    {"from":"A","to":"B","event":"complete","exit_reason":"again"},
+    {"from":"B","to":"A","event":"complete"},
+    {"from":"A","to":"C","event":"complete","exit_reason":"stop"}
   ]
 }
 ```
 
-**Directed cycle — general rule**:
-- 所有节点一律平等：输出 route，引擎匹配边。
-- 一个节点是否参与环路决策，仅取决于它有没有出边指向环内。
-- 终止保证：至少一个环内节点带 `route_policy`（N 轮后强制改 route）或 `threshold`（N 次事件后触发退出边）。
-- Validator 要求所有节点可达出口（无出边的节点）。环需要一条退出边 → 出口信号节点。
+**Cycle rules / 环路规则**：
+- All nodes equal — output route, engine matches edges / 所有节点平等，输出 route，引擎匹配边
+- At least one node has `route_policy` (force route after N runs) or `threshold` → guarantees termination / 终止保证
+- Validator requires every node reachable → an exit node (node with 0 outgoing edges). Cycle needs exit edge → signal node.
+- `route_policy.max_runs=N`：node runs N-1 times, skipped on Nth trigger → saves one LLM call / 跑 N-1 次，第 N 次跳过省一次调用
 
-```
-A ──"again"──→ B ──→ A  (loop)
-A ──"stop"───→ C         (exit)
-```
+## Edge Rules / 边规则
 
-## Provider Types
+| Field / 字段 | Values / 值 | Meaning / 含义 |
+|-------|---------|---------|
+| `trigger` | `"any"` (default), `"all"` | `"all"` = wait for all incoming all-edges (fan-in) / 等所有入边 |
+| `event` | `"complete"`, `"failed"`, `"timeout"` | Event type from node exit code / 节点退出码决定 |
+| `exit_reason` | string or null | Exact match on node's `route`. null = any route / 匹配任意 |
+| `threshold` | integer, default 1 | Fire after N matching events. Use for self-loops / 自环用 |
 
-| Type | Use case | Command handling |
-|------|----------|-----------------|
-| `"llm"` | Claude/opencode/nga | Engine passes `--cmd` to `llm_node.py`. Prompt from `prompt` field, sent via stdin. `{{inputs.X}}` auto-replaced by engine. `{{metadata.run_count}}` auto-replaced. |
-| `"shell"` | Scripts, echo, simple commands | Wrapped in `cmd /c` (Win) or `sh -c` (Unix). `{{inputs.X}}` replaced. |
-| `"subprocess"` | Direct executable | No shell. Split on whitespace. Avoid — use `"shell"` instead. |
+## Dataflow Rules / 数据流规则
 
-## Command Rules
+- **Edges ≠ Dataflows**：edges schedule execution，dataflows route data。Both are independent graphs.
+- **`alias`**：rename input key for downstream. Default key = source node ID.
+- **Latest only**：in cycles，each run overwrites previous output.
 
-- **Shell nodes**: Use `scripts/xxx.bat` for deterministic output. `.bat` files auto-resolved relative to engine binary.
-- **LLM nodes**: `command` is CLI flags only (no `-p`). Prompt goes via stdin, no command-line length limit.
-- **Avoid inline `python -c "..."`** — quoting breaks on Windows. Put Python in `scripts/xxx.py`.
-- **Scripts location**: Put `.bat`/`.py` in both `engine/scripts/` and `release/scripts/`.
+## File Output / 文件输出
 
-## Edge Rules
+1. **Prompt instruction / Prompt 指令**：`"Write your review to review.md."` — Claude uses Write tool. No extra nodes.
+2. **Shell node**：`{"type":"shell","command":"python scripts/write_report.py"}` — script writes from stdin context.
 
-- `trigger: "any"` — immediate downstream trigger. Default.
-- `trigger: "all"` — wait for ALL `all`-strategy incoming edges. Use for fan-in.
-- `exit_reason` — exact string match on node's output `route`. `null` matches any route (including empty).
-- `event` — `"complete"` (exit 0), `"failed"` (exit ≠ 0), `"timeout"` (killed by engine).
-- `threshold` — fire after N matching events. Default 1. Use for self-loops.
+## Long Prompt Strategy / 长 Prompt 策略
 
-## Dataflow Rules
+Prompt > ~4KB：give Claude the file path. Claude reads via Read tool. Path is short; content never hits command line.
+Prompt 超 4KB 时给 Claude 文件路径，Claude 用 Read 工具自读，内容不经过命令行。
 
-- **Edges ≠ Dataflows**: edges schedule execution order. Dataflows route data. Both are independent graphs.
-- **`alias`**: rename input key for downstream node. Default key = source node ID.
-- **Latest only**: in cycles, each run overwrites previous output. Downstream sees final value.
+## LLM Prompt Design / Prompt 设计
 
-## File Output Strategy
+- **Always specify exact output format** / 必须明确输出格式：`Output ONLY: {"route":"again|stop","content":"..."}`
+- **Always include `routes` list** / 必须有 routes 列表：`"routes": ["again", "stop"]`
+- **Template variables / 模板变量**：`{{inputs.X}}` (upstream data), `{{metadata.run_count}}` (cycle round)
 
-Two approaches:
-
-1. **Shell node**: `{"type":"shell","command":"python scripts/write_report.py"}` — script reads stdin context, writes files.
-2. **Prompt instruction**: Tell Claude to write files directly (Claude Code has Write/Bash tools in `-p` mode). Example: `"Write your review to review.md."` No extra nodes needed.
-
-## Prompt Length Strategy
-
-When prompt exceeds ~4KB (e.g., reviewing a large document): give Claude the file path in the prompt. Claude reads the file itself via the Read tool. File paths are short; the document content never hits the command line.
-
-```
-A(llm: "Read ../path/to/doc.md. Review...")
-```
-
-## LLM Prompt Design
-
-- **Always specify exact output format**: `Output ONLY: {"route":"again|stop","content":"## Review\n..."}`
-- **Always include `routes` list**: `"routes": ["again", "stop"]`
-- **Use template variables**: `{{inputs.X}}` for upstream data, `{{metadata.run_count}}` for cycle iteration
-
-## MCP Integration
+## MCP Integration / MCP 集成
 
 ```json
-{
-  "method": "run_workflow",
-  "params": {
-    "workflow_json": "<JSON string>",
-    "dashboard_url": "http://127.0.0.1:48080"
-  }
-}
+{"method":"run_workflow","params":{"workflow_json":"<JSON>","dashboard_url":"http://127.0.0.1:48080"},"id":1}
 ```
+Returns `{run_id, dashboard_url, monitor_url}`。
 
-Returns `{run_id, dashboard_url, monitor_url}`.
+## Common Pitfalls / 常见问题
 
-## Common Pitfalls
-
-| Symptom | Root cause | Fix |
-|---------|-----------|-----|
-| Cycle never exits | `route_policy` missing or wrong `then_route` | Add `route_policy: {max_runs: N, then_route: "stop"}` |
-| Fix node never starts | `exit_reason` mismatch | Match edge `exit_reason` exactly to LLM output `route` |
-| LLM route always empty | Claude doesn't output JSON | Prompt must say "Output ONLY JSON with route field"; add `routes` list |
-| No data in downstream node | Missing dataflow | Add `dataflows: [{from: X, to: Y}]` |
-| `{{inputs.X}}` not replaced | No dataflow from X to current node | Check dataflows array |
-| Workflow rejected: "exit not reachable" | No node with 0 outgoing edges reachable | Add exit signal node + exit edge from cycle |
-| Prompt too long, Claude hangs | Document in prompt > ~4KB via `-p` | Use seed node or give file path instead |
+| Symptom / 现象 | Fix / 解法 |
+|---------|------|
+| Cycle never exits / 环路不退出 | Add `route_policy: {max_runs: N, then_route: "stop"}` |
+| Fix/worker node never starts | Match `exit_reason` exactly to LLM output `route` |
+| LLM route always empty / 始终为空 | Prompt must say "Output ONLY JSON with route field" |
+| Downstream gets no data / 下游无数据 | Add `dataflows: [{from: X, to: Y}]` |
+| `{{inputs.X}}` not replaced / 未替换 | Check dataflows has `from: X, to: current_node` |
+| Validator: "exit not reachable" | Add exit signal node + exit edge from cycle |
+| Prompt too long, claude hangs / 卡住 | Give file path instead of inline content / 给文件路径非内联 |
