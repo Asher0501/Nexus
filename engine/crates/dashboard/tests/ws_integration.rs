@@ -55,6 +55,7 @@ async fn spawn_server() -> (String, Store, Arc<WsRoom>) {
     let state = AppState {
         store: store.clone(),
         room: room.clone(),
+        cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     let app: Router = Router::new()

@@ -63,6 +63,7 @@ async fn spawn_server() -> (String, Store, Arc<WsRoom>) {
     let state = AppState {
         store: store.clone(),
         room: room.clone(),
+        cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     let app: Router = Router::new()
@@ -379,7 +380,7 @@ async fn api_11_stop_run() {
         .send()
         .await
         .expect("stop run");
-    assert_eq!(resp.status(), 501);
+    assert_eq!(resp.status(), 404);
     let val: serde_json::Value = resp.json().await.expect("parse stop response");
     assert_eq!(val["run_id"], run_id);
     assert!(val["error"].as_str().is_some());

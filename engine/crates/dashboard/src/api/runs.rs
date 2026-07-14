@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use crate::db::Store;
 use crate::engine_bridge;
 use crate::models::RunRow;
+use crate::ws::WsRoom;
 use nexus_engine::model::EngineConfig;
 
 /// GET /api/workflows/{id}/run — list runs for a workflow.
@@ -193,6 +194,9 @@ pub async fn graph_status(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use super::*;
     use axum::Router;
     use std::sync::LazyLock;
@@ -210,6 +214,7 @@ mod tests {
         let state = crate::state::AppState {
             store: STORE.clone(),
             room,
+            cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         };
         Router::new()
             .route("/workflows/{id}/run", axum::routing::get(super::list).post(super::trigger))
