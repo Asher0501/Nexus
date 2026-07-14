@@ -92,19 +92,17 @@ Both edges AND dataflows must be declared independently.
 ```
 
 **Directed cycle — general rule**:
-- 环中**至少有一个决策节点**（带 `route_policy`，2 条出边：继续 + 退出）。
-- 其余都是**工作节点**（无条件返回，1 条出边：回到链上下一个节点）。
-- 工作节点的职责：完成本轮任务，把控制权交还给下一节点做判断。
-- 节点不感知自己在环中。它只输出 route，引擎匹配边。
-- 终止保证：`route_policy`（N 轮后强制改 route）或 `threshold`（N 次事件后触发退出边）。
+- 没有"决策节点"和"工作节点"之分。所有节点一律平等：输出 route，引擎匹配边。
+- 一个节点是否参与环路决策，仅取决于它有没有出边指向环内。有就是环的一部分。
+- 终止保证：至少一个环内节点带 `route_policy`（N 轮后强制改 route）或 `threshold`（N 次事件后触发退出边），确保环路必然终止。
 
 **Example**:
 ```
-A ──"again"──→ B ──(always)──→ A  (loop)
-A ──"stop"───→ C                   (exit)
+A ──"again"──→ B ──→ A  (loop)
+A ──"stop"───→ C         (exit)
 ```
-- A（决策节点）：2 条出边。继续 loop → B。退出 → C。
-- B（工作节点）：1 条出边。干完活回到 A，不决策。
+A 有两条出边：`"again"` 走回环路，`"stop"` 退出。B 有一条出边：回到 A。
+A 和 B 是平等的——A 恰好有两条出边，B 有一条。仅此而已。
 
 ## Provider Types
 
