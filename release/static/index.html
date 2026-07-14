@@ -321,6 +321,11 @@ async function renderRunMonitor(runId) {
   let graph = { nodes:[], edges:[] };
   try { graph = await GET('/api/workflows/' + run.workflow_id + '/graph'); } catch(e) {}
 
+  // Init node status panel from graph data — shows all nodes as Pending initially
+  (graph.nodes||[]).forEach(function(n) {
+    if (!nodeStates[n.id]) nodeStates[n.id] = { status: 'Pending', ts: 0 };
+  });
+
   document.getElementById('content').innerHTML = `
     <div class="meta">
       <span>Run: <code>${runId.slice(0,8)}</code></span>
@@ -336,6 +341,7 @@ async function renderRunMonitor(runId) {
       </div>
     </div>`;
 
+  renderStatusPanel(); // Show initial Pending states from graph data
   if (graph.nodes && graph.nodes.length) initDAG('dag-live', graph);
   connectWS(runId);
 }

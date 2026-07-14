@@ -2,10 +2,7 @@
   "nodes": [
     {
       "id": "start",
-      "providers": [{
-        "type": "shell",
-        "command": "python -c \"import sys,json; doc=open('../bak/theory/DESIGN_PHILOSOPHY.md',encoding='utf-8').read(); json.dump({'route':'ok','content':doc}, sys.stdout)\""
-      }],
+      "providers": [{ "type": "shell", "command": "scripts/start_review.bat" }],
       "process_timeout_secs": 10
     },
     {
@@ -13,7 +10,7 @@
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are a design document critic (Round {{metadata.run_count}}/3). Review the design philosophy document for:\n1. Consistency — does every section operate at the SAME abstraction altitude?\n2. Value — does each claim contribute something non-obvious and actionable?\n3. Completeness — any logical leaps or missing links between claims?\n\nOriginal document:\n{{inputs.start}}\n\nPrevious fix applied (Round {{metadata.run_count}} only):\n{{inputs.fix}}\n\nOutput ONLY a JSON with route field. If you find issues, route='needs_fix'. If the document is already excellent, route='done'.\n\nFormat:\n{\"route\":\"needs_fix|done\",\"content\":\"## Review Round {{metadata.run_count}}\\n\\n### Abstraction Consistency\\n...\\n### Claim Value Assessment\\n...\\n### Logical Gaps\\n...\\n### Verdict: (NEEDS_FIX | DONE)\"}",
+        "prompt": "You are a design critic (Round {{metadata.run_count}}/3). Review this design doc for: 1) consistent abstraction altitude, 2) non-obvious value per claim, 3) logical gaps.\n\nDocument:\n{{inputs.start}}\n\nPrevious fix:\n{{inputs.fix}}\n\nIf issues found: route='needs_fix'. If all good: route='done'.\nOutput: {\"route\":\"needs_fix|done\",\"content\":\"## Round {{metadata.run_count}}\\n...\"}",
         "routes": ["needs_fix", "done"]
       }],
       "process_timeout_secs": 180,
@@ -24,17 +21,14 @@
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are a design document editor. Based on the review findings, rewrite the problematic sections. Output the IMPROVED TEXT that addresses every issue found.\n\nReview (Round {{metadata.run_count}}):\n{{inputs.review}}\n\nOriginal document (for context):\n{{inputs.start}}\n\nOutput ONLY:\n{\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\\n\\n### Issues Addressed\\n...\\n### Rewritten Sections\\n...\"}",
+        "prompt": "You are a design editor. Rewrite sections based on the review. Original doc for context:\n\n{{inputs.start}}\n\nReview:\n{{inputs.review}}\n\nOutput: {\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\\n...\"}",
         "routes": ["fixed"]
       }],
       "process_timeout_secs": 180
     },
     {
       "id": "report",
-      "providers": [{
-        "type": "shell",
-        "command": "python -c \"import sys,json; ctx=json.load(sys.stdin); inputs=ctx.get('inputs',{}); rev=inputs.get('review',''); fix=inputs.get('fix',''); open('review.md','w',encoding='utf-8').write(rev); open('fix.md','w',encoding='utf-8').write(fix); print(json.dumps({'route':'ok','content':'review.md + fix.md written'}))\""
-      }],
+      "providers": [{ "type": "shell", "command": "scripts/node_ok.bat" }],
       "process_timeout_secs": 10
     }
   ],
