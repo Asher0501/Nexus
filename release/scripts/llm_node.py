@@ -167,8 +167,10 @@ def parse_text_output(stdout: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # 2. Regex: find "route":"...","content":"..." anywhere, even nested in NDJSON
-    for m in ROUTE_RE.finditer(stdout):
+    # 2. Normalize: unescape JSON string escapes.  In NDJSON, the route JSON
+    # appears as {\"route\":\"again\",...}.  Turn \" into plain " so the regex matches.
+    unescaped = stdout.replace('\\"', '"').replace('\\\\', '\\')
+    for m in ROUTE_RE.finditer(unescaped):
         route = m.group(1)
         # Unescape JSON string escapes (\", \\, \n, etc.)
         content_raw = m.group(2)
