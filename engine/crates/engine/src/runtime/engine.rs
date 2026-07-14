@@ -309,16 +309,62 @@ impl Engine {
                     command: String::new(),
                 })
             });
-        let ctx_run_count = self
+        let current_count = self
             .scheduler
             .state()
             .run_counts
             .get(&node_id)
             .copied()
-            .unwrap_or(0)
-            .saturating_add(1);
+            .unwrap_or(0);
+        let ctx_run_count = current_count.saturating_add(1);
+
+        // route_policy: if this run would exceed max, skip execution
+        // and emit synthetic complete with then_route.
+        if let Some(policy) = self
+            .scheduler
+            .graph()
+            .node_weight(node_id)
+            .and_then(|nd| nd.route_policy.clone())
+        {
+            if let crate::model::workflow::RoutePolicyDef::MaxRuns { max, then_route } = &policy {
+                if ctx_run_count > *max {
+                    let nid = self.node_id(node_id);
+                    tracing::info!(
+                        target: "nexus::engine",
+                        node_id = nid,
+                        run_count = ctx_run_count,
+                        max,
+                        then_route,
+                        "route_policy: max_runs exceeded, skipping node"
+                    );
+                    // Update run count and record the skip
+                    if let Some(count) = self.scheduler.state_mut().run_counts.get_mut(&node_id) {
+                        *count = ctx_run_count;
+                    }
+                    self.data_router.store_output(node_id, "");
+                    let outcome = crate::nodeshell::NodeOutcome {
+                        output: crate::nodeshell::NodeOutput {
+                            route: then_route.clone(),
+                            content: String::new(),
+                        },
+                        exit_code: 0,
+                        exit_reason: Some(then_route.clone()),
+                    };
+                    let tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(EngineEvent::NodeCompleted { node_id, outcome: Ok(outcome) }).await;
+                    });
+                    // Notify callback
+                    if let Some(ref cb) = self.event_cb {
+                        cb(crate::runtime::NodeEvent::NodeCompleted { node_id: nid.clone() });
+                    }
+                    return;
+                }
+            }
+        }
+
         if let Some(count) = self.scheduler.state_mut().run_counts.get_mut(&node_id) {
-            *count += 1;
+            *count = ctx_run_count;
         }
         let ctx_timed_out = self
             .scheduler
