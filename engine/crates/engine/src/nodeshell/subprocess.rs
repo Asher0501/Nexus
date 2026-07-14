@@ -112,7 +112,29 @@ impl SubprocessExecutor {
 
     /// Render a prompt template, replacing `{{inputs.name}}` with values
     /// from the node context's inputs map.
+    /// Escape a value for use in a shell command.
+    /// Windows cmd: wrap in quotes, escape internal `"` → `""` and `%` → `%%`.
+    /// Unix sh: wrap in single quotes, escape internal `'` → `'\''`.
+    fn shell_escape(value: &str) -> String {
+        if cfg!(windows) {
+            let escaped = value.replace('"', "\"\"")
+                             .replace('%', "%%");
+            format!("\"{}\"", escaped)
+        } else {
+            let escaped = value.replace('\'', "'\\''");
+            format!("'{}'", escaped)
+        }
+    }
+
     fn render_template(template: &str, inputs: &HashMap<String, String>) -> String {
+        Self::render_template_impl(template, inputs, false)
+    }
+
+    fn render_template_shell(template: &str, inputs: &HashMap<String, String>) -> String {
+        Self::render_template_impl(template, inputs, true)
+    }
+
+    fn render_template_impl(template: &str, inputs: &HashMap<String, String>, shell: bool) -> String {
         let mut result = String::with_capacity(template.len());
         let mut rest = template;
 
@@ -127,7 +149,11 @@ impl SubprocessExecutor {
             }
             let key = &after_start[..end];
             let value = inputs.get(key).map(|s| s.as_str()).unwrap_or("");
-            result.push_str(value);
+            if shell {
+                result.push_str(&Self::shell_escape(value));
+            } else {
+                result.push_str(value);
+            }
             let consumed = start + 9 + end + 2;
             rest = &rest[consumed..];
         }
@@ -201,8 +227,13 @@ impl SubprocessExecutor {
         chunk_tx: Option<mpsc::Sender<NodeChunk>>,
     ) -> Result<NodeOutcome, SpawnError> {
         // Render template in command string ({{inputs.x}} → ctx.inputs[x]).
+        // Shell mode: escape values to prevent command injection.
         let command = if self.command.contains("{{inputs.") {
-            Self::render_template(&self.command, &ctx.inputs)
+            if self.shell {
+                Self::render_template_shell(&self.command, &ctx.inputs)
+            } else {
+                Self::render_template(&self.command, &ctx.inputs)
+            }
         } else {
             self.command.clone()
         };
