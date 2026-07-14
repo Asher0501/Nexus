@@ -210,6 +210,44 @@ def parse_text_output(stdout: str) -> dict:
             return {"route": "", "content": inner}
         return {"route": "", "content": json.dumps(parsed)}
 
+    # If global extract_json failed, try parsing each line as NDJSON
+    # (Claude --verbose outputs one JSON object per line).
+    if parsed is None:
+        for line in reversed(stdout.strip().splitlines()):
+            line = line.strip()
+            if not line: continue
+            obj = extract_json(line)
+            if not obj or not isinstance(obj, dict): continue
+            # Claude result envelope
+            if obj.get("type") == "result":
+                inner = obj.get("result", "")
+                if isinstance(inner, str):
+                    ip = extract_json(inner)
+                    if ip and "route" in ip:
+                        return {"route": str(ip["route"]), "content": str(ip.get("content", ""))}
+                    return {"route": "", "content": inner}
+            # Claude assistant text
+            if obj.get("type") == "assistant":
+                msg = obj.get("message", {})
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for c in reversed(content):
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            txt = c.get("text", "")
+                            ip = extract_json(txt)
+                            if ip and "route" in ip:
+                                return {"route": str(ip["route"]), "content": str(ip.get("content", ""))}
+                            # Last text output as fallback content
+                            return {"route": "", "content": txt}
+        # If we got here, try to extract route from raw text with regex
+        m = re.search(r'\{[^{}]*"route"\s*:\s*"([^"]*)"[^{}]*\}', stdout)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+                return {"route": str(obj.get("route", "")), "content": str(obj.get("content", ""))}
+            except json.JSONDecodeError:
+                pass
+
     # Direct JSON
     if parsed and "route" in parsed:
         return {"route": str(parsed["route"]), "content": str(parsed.get("content", ""))}
