@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::extract::{Path, State};
 use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
@@ -7,7 +5,6 @@ use serde_json::{json, Value};
 use crate::db::Store;
 use crate::engine_bridge;
 use crate::models::RunRow;
-use crate::ws::WsRoom;
 use nexus_engine::model::EngineConfig;
 
 /// GET /api/workflows/{id}/run — list runs for a workflow.

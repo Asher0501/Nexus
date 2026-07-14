@@ -107,5 +107,5 @@ pub async fn run_workflow(
         });
     }
 
-    engine.run().await.map_err(|e| format!("{e:?}"))
+    engine.run().await.map(|_| ()).map_err(|e| format!("{e:?}"))
 }

@@ -28,7 +28,9 @@ mod state;
 mod static_files;
 mod ws;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
@@ -58,7 +60,7 @@ async fn main() {
     let state = AppState {
         store,
         room,
-        cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        cancel_flags: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
 
     let app = Router::new()
