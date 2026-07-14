@@ -349,7 +349,7 @@ async function renderRunMonitor(runId) {
   let graph = { nodes:[], edges:[] };
   try { graph = await GET('/api/workflows/' + run.workflow_id + '/graph'); } catch(e) {}
 
-  // Init node status panel from graph data — shows all nodes as Pending initially
+  // Init node status panel from graph data — only for nodes not yet seen.
   (graph.nodes||[]).forEach(function(n) {
     if (!nodeStates[n.id]) nodeStates[n.id] = { status: 'Pending', ts: 0 };
   });
@@ -472,11 +472,18 @@ function initDAG(containerId, graphData) {
     });
 
     dagReady = true;
+    // Replay buffered WS statuses
     for (var i = 0; i < pendingStatuses.length; i++) {
       var s = pendingStatuses[i];
       dagNodes.update({ id: s.nodeId, color: { background: STATUS_COLORS[s.status] || '#64748b' } });
     }
     pendingStatuses = [];
+    // Restore DAG colors from sessionStorage (survives refresh)
+    for (var nid in nodeStates) {
+      if (nodeStates.hasOwnProperty(nid)) {
+        dagNodes.update({ id: nid, color: { background: STATUS_COLORS[nodeStates[nid].status] || '#64748b' } });
+      }
+    }
   } catch(e) {
     var c = document.getElementById(containerId);
     if (c) c.innerHTML = '<div class="empty">DAG error: ' + (e.message||'') + '</div>';
