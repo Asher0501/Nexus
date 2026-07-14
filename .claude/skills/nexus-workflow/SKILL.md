@@ -167,11 +167,14 @@ Returns `{run_id, dashboard_url, monitor_url}`.
 
 ## LLM Command Flags
 
-Always include `--dangerously-skip-permissions` in the claude command for non-interactive workflows, otherwise file Read/Write operations will hang waiting for approval:
+Always use these flags for non-interactive workflow LLM nodes:
 
 ```
-"command": "claude -p \"{{prompt}}\" --output-format json --verbose --dangerously-skip-permissions"
+"command": "claude -p \"{{prompt}}\" --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions"
 ```
+
+- `--output-format stream-json` + `--include-partial-messages`: force line-buffered NDJSON, enables real-time streaming
+- `--dangerously-skip-permissions`: allow file Read/Write without interaction
 
 ## Common Pitfalls
 
