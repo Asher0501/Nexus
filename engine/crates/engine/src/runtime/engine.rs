@@ -327,7 +327,7 @@ impl Engine {
             .and_then(|nd| nd.route_policy.clone())
         {
             if let crate::model::workflow::RoutePolicyDef::MaxRuns { max, then_route } = &policy {
-                if ctx_run_count > *max {
+                if ctx_run_count >= *max {
                     let nid = self.node_id(node_id);
                     tracing::info!(
                         target: "nexus::engine",
