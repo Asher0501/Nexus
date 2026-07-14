@@ -54,41 +54,18 @@ def read_nexus_context() -> dict:
 # CLI resolution — cross-platform (Windows + Linux)
 # ═══════════════════════════════════════════════════════════════════
 
-def _find_exe(name: str) -> list[str]:
-    """Resolve a CLI name to executable argv prefix.
-    Windows: prefers real .exe behind npm .cmd wrappers.
-    Linux: uses bare name from PATH."""
+def _resolve_program(name: str) -> str:
+    """Resolve CLI name to executable path."""
+    # Prefer .exe on Windows (bypasses .cmd wrapper)
     if sys.platform == "win32":
         exe = shutil.which(name + ".exe")
         if exe:
-            return [exe]
-        cmd_path = shutil.which(name + ".cmd")
-        if cmd_path:
-            real = _parse_cmd_for_exe(cmd_path)
-            if real and os.path.isfile(real):
-                return [real]
-            return ["cmd.exe", "/c", name]
-    found = shutil.which(name) or name
-    return [found]
-
-
-def _parse_cmd_for_exe(cmd_path: str) -> str | None:
-    """Parse a Windows .cmd wrapper to find the real .exe."""
-    try:
-        with open(cmd_path) as f:
-            for line in f:
-                m = re.search(r'"([^"]*\.exe)"', line)
-                if m:
-                    rel = m.group(1).replace("%dp0%", "").lstrip("\\/")
-                    return os.path.normpath(
-                        os.path.join(os.path.dirname(cmd_path), rel))
-    except OSError:
-        pass
-    return None
+            return exe
+    return shutil.which(name) or name
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Subprocess execution — any CLI, any platform
+# Subprocess execution
 # ═══════════════════════════════════════════════════════════════════
 
 def emit_stderr(line: str):
@@ -96,32 +73,20 @@ def emit_stderr(line: str):
 
 
 def run_cmd(cmd_str: str, stdin_text: str | None = None) -> subprocess.Popen:
-    """Spawn the CLI command. If stdin_text is provided, write it to the
-    process's stdin (for passing prompts without -p)."""
+    """Spawn CLI. Prompt goes via stdin (not -p), avoiding command-line limits."""
     program = cmd_str.split(" ", 1)[0]
-    prefix = _find_exe(program)
+    exe = _resolve_program(program)
+    if exe != program:
+        cmd_str = exe + cmd_str[len(program):]
 
-    use_shell = False
-    if len(prefix) == 1 and prefix[0] != program:
-        cmd_str = prefix[0] + cmd_str[len(program):]
-    elif prefix == [program] or prefix[0] == program:
-        pass
-    else:
-        use_shell = True
-
-    # shell=True blocks stdin forwarding. When stdin is needed,
-    # force shell=False — CreateProcess can execute .CMD directly.
-    if stdin_text and use_shell:
-        use_shell = False
-
-    emit_stderr(f"[llm_node] {os.path.basename(prefix[0])}")
+    emit_stderr(f"[llm_node] {os.path.basename(exe)}")
     proc = subprocess.Popen(
         cmd_str,
         stdin=subprocess.PIPE if stdin_text else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        shell=use_shell,
+        shell=False,
     )
     if stdin_text and proc.stdin:
         proc.stdin.write(stdin_text)
