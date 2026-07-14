@@ -149,7 +149,7 @@ def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
         while not heartbeat_stop.is_set():
             time.sleep(0.3)
             if not heartbeat_stop.is_set():
-                emit_stderr("[llm_node] .")
+                emit_stderr(" ")
 
     threading.Thread(target=_read_stderr, daemon=True).start()
     threading.Thread(target=_heartbeat, daemon=True).start()

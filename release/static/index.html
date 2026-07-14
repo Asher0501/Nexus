@@ -565,6 +565,7 @@ function connectWS(runId) {
 
 // ── Log Stream ──────────────────────────────────────────────────
 function appendLog(nodeId, text, ts) {
+  if (!text || !text.trim()) return; // skip heartbeat whitespace
   logs.push({ nodeId, text, ts });
   if (logs.length > 500) logs.shift();
   saveState();
