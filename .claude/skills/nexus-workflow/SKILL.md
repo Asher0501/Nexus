@@ -58,44 +58,54 @@ Both edges AND dataflows must be declared independently.
 ### Conditional Branch
 `exit_reason` on edge matches the node's output `route` field exactly. Null exit_reason matches any route.
 
-### Directed Cycle (review ⇄ fix, N rounds) — PRIMARY PATTERN
+### Directed Cycle (general pattern for repeated operations)
 
 ```json
 {
   "nodes": [
     {
-      "id": "review",
+      "id": "A",
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "Review (Round {{metadata.run_count}}/N). Input: {{inputs.start}}. Previous fix: {{inputs.fix}}. Issues → route='needs_fix'. All good → route='done'. Output ONLY JSON.",
-        "routes": ["needs_fix", "done"]
+        "prompt": "Task (Round {{metadata.run_count}}/N). Input: {{inputs.seed}}. B output: {{inputs.B}}. Continue → route='again'. Done → route='stop'. Output ONLY JSON.",
+        "routes": ["again", "stop"]
       }],
-      "route_policy": { "type": "max_runs", "max": N, "then_route": "done" }
+      "route_policy": { "type": "max_runs", "max": N, "then_route": "stop" }
     },
     {
-      "id": "fix",
+      "id": "B",
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "Fix issues. Review: {{inputs.review}}. Original: {{inputs.start}}. Output ONLY JSON with route='fixed'.",
-        "routes": ["fixed"]
+        "prompt": "Process iteration. A output: {{inputs.A}}. Output ONLY JSON with route='done'.",
+        "routes": ["done"]
       }]
     }
   ],
   "edges": [
-    { "from": "review", "to": "fix",    "event": "complete", "exit_reason": "needs_fix" },
-    { "from": "fix",    "to": "review", "event": "complete" },
-    { "from": "review", "to": "done",   "event": "complete", "exit_reason": "done" }
+    { "from": "A", "to": "B", "event": "complete", "exit_reason": "again" },
+    { "from": "B", "to": "A", "event": "complete" },
+    { "from": "A", "to": "C", "event": "complete", "exit_reason": "stop" }
   ]
 }
 ```
 
-**Cycle mechanics**:
-1. Review outputs `needs_fix` → edge review→fix fires → fix runs → fix outputs `fixed` → edge fix→review fires → cycle continues
-2. Review runs N times. On run N, `route_policy` overrides output route to `done` → edge review→done fires → cycle exits
-3. `{{metadata.run_count}}` in prompt tells LLM which round. Values: 1, 2, ..., N.
-4. Cycle edges: forward (review→fix) has `exit_reason`. Return (fix→review) has NO `exit_reason`. Exit (review→done) matches `then_route`.
+**Directed cycle — general rule**:
+- 环中有且仅有一个**决策节点**（带 `route_policy`，2 条出边：继续 + 退出）。
+- 其余都是**工作节点**（无条件返回，1 条出边：回到决策节点）。
+- 工作节点的唯一职责：完成本轮任务，把控制权交还给决策节点做下一轮判断。
+- 节点不感知自己在环中。它只输出 route，引擎匹配边。
+- 终止保证：`route_policy`（N 轮后强制改 route）或 `threshold`（N 次事件后触发退出边）。
+- 适用于任意 N 节点环路：1 个决策节点 + (N-1) 个工作节点。
+
+**Example**:
+```
+A ──"again"──→ B ──(always)──→ A  (loop)
+A ──"stop"───→ C                   (exit)
+```
+- A（决策节点）：2 条出边。继续 loop → B。退出 → C。
+- B（工作节点）：1 条出边。干完活回到 A，不决策。
 
 ## Provider Types
 
