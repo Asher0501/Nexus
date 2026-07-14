@@ -433,7 +433,13 @@ impl Engine {
         let outcome_tx = tx.clone();
         let semaphore = self.semaphore.clone();
         tokio::spawn(async move {
-            let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
+            let _permit = match semaphore.acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!(target: "nexus::engine", node_id = nid, "semaphore closed, skipping node");
+                    return;
+                }
+            };
             let outcome = executor.run(ctx, timeout, &nid, Some(chunk_tx)).await;
             let _ = outcome_tx.send(EngineEvent::NodeCompleted {
                 node_id,
