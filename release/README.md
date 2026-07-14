@@ -109,12 +109,18 @@ release/
 │       └── nexus-mcp-server       # Linux MCP Server
 ├── scripts/
 │   ├── llm_node.py                # LLM provider 运行时依赖
-│   ├── start_node.py / review_node.py / fix_opencode.py / retro_node.py
-│   ├── reviewer_emit_approved.py / handler_approved.py / handler_rejected.py
-│   └── review_design_philosophy.py
+│   ├── node_ok.bat                # 通用 OK 信号节点
+│   ├── node_approved.bat          # approved 路由节点
+│   ├── node_rejected.bat          # rejected 路由节点
+│   └── sleep3.bat                 # 超时测试节点
+├── static/                        # Dashboard 前端 + 示范工作流
+│   ├── index.html                 # Dashboard SPA
+│   ├── arch-review-loop.json      # 架构检视工作流
+│   └── review-loop.json           # 通用检视循环工作流
 ├── examples/                      # 示例工作流 JSON
-├── QUICKSTART.md                  # 快速入门指南
+├── QUICKSTART.md                  # 快速入门指南（含 c2/c3/c4 示范用例）
 ├── WORKFLOW_REFERENCE.md          # 工作流定义完整参考
+├── NEXUS_WORKFLOW_SKILL.md        # Claude Code 生成工作流的 Skill 参考
 └── README.md                      # 本文件
 ```
 
