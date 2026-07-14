@@ -95,30 +95,38 @@ def emit_stderr(line: str):
     print(line, file=sys.stderr, flush=True)
 
 
-def run_cmd(cmd_str: str) -> subprocess.Popen:
-    """Spawn the CLI command. Resolves the program intelligently on
-    Windows (preferring .exe) and falls back to shell on both platforms."""
+def run_cmd(cmd_str: str, stdin_text: str | None = None) -> subprocess.Popen:
+    """Spawn the CLI command. If stdin_text is provided, write it to the
+    process's stdin (for passing prompts without -p)."""
     program = cmd_str.split(" ", 1)[0]
     prefix = _find_exe(program)
 
     use_shell = False
     if len(prefix) == 1 and prefix[0] != program:
-        # Found a better path (e.g. claude.exe) — replace program in command
         cmd_str = prefix[0] + cmd_str[len(program):]
     elif prefix == [program] or prefix[0] == program:
-        pass  # use as-is
+        pass
     else:
-        use_shell = True  # cmd.exe /c wrapper
+        use_shell = True
+
+    # shell=True blocks stdin forwarding. When stdin is needed,
+    # force shell=False — CreateProcess can execute .CMD directly.
+    if stdin_text and use_shell:
+        use_shell = False
 
     emit_stderr(f"[llm_node] {os.path.basename(prefix[0])}")
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         cmd_str,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if stdin_text else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         shell=use_shell,
     )
+    if stdin_text and proc.stdin:
+        proc.stdin.write(stdin_text)
+        proc.stdin.close()
+    return proc
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -222,15 +230,20 @@ def main():
         sys.stdout.write(json.dumps({"route": "error", "content": "no --cmd provided"}))
         sys.exit(1)
 
-    # Replace {{prompt}} placeholder with prompt from stdin context.
-    # Escape quotes in the prompt so they survive subprocess argument parsing.
+    # Get prompt from stdin context (engine sends it there).
     prompt = ctx.get("extensions", {}).get("prompt", "")
+
+    # If command has {{prompt}}, replace it (backward compat, -p mode).
     if prompt and "{{prompt}}" in cmd_str:
         safe_prompt = prompt.replace("\\", "\\\\").replace("\"", "\\\"")
         cmd_str = cmd_str.replace("{{prompt}}", safe_prompt)
+        use_stdin = False
+    else:
+        # No {{prompt}} → pass prompt via CLI stdin instead of -p
+        use_stdin = bool(prompt)
 
     try:
-        proc = run_cmd(cmd_str)
+        proc = run_cmd(cmd_str, stdin_text=prompt if use_stdin else None)
     except FileNotFoundError as e:
         sys.stdout.write(json.dumps({"route": "error", "content": f"not found: {e}"}))
         sys.exit(1)
