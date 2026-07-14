@@ -62,6 +62,15 @@ pub enum ValidationError {
         source_id: String,
     },
 
+    /// A node references `{{inputs.X}}` in its prompt or command but no
+    /// dataflow `from: X, to: this_node` exists.
+    ReferencedInputWithoutDataflow {
+        /// The node that references the input.
+        node_id: String,
+        /// The referenced input source node ID.
+        source_id: String,
+    },
+
     /// Graph invariant violation during construction.
     BuildInvariant {
         /// Human-readable description of which invariant failed.
@@ -132,6 +141,13 @@ impl fmt::Display for ValidationError {
             }
             Self::ZeroTimeout { node_id } => {
                 write!(f, "node '{}' has process_timeout_secs = 0 (would timeout immediately)", node_id)
+            }
+            Self::ReferencedInputWithoutDataflow { node_id, source_id } => {
+                write!(
+                    f,
+                    "node '{}' uses {{{{inputs.{}}}}} but no dataflow from '{}' to '{}' exists",
+                    node_id, source_id, source_id, node_id,
+                )
             }
         }
     }

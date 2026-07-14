@@ -166,7 +166,6 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
 
     // 9. InputSourceUnreachable (reuses `reachable` from above)
     if !entry_ids.is_empty() {
-
         for df in &def.dataflows {
             if id_to_node.contains_key(df.from.as_str())
                 && !reachable.contains(df.from.as_str())
@@ -175,6 +174,54 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
                     node_id: df.to.clone(),
                     source_id: df.from.clone(),
                 });
+            }
+        }
+    }
+
+    // 10. ReferencedInputWithoutDataflow — node uses {{inputs.X}} but no dataflow X→this_node
+    {
+        for node in &def.nodes {
+            // Collect text to scan: prompt + command from all providers
+            let mut text = String::new();
+            for provider in &node.providers {
+                match provider {
+                    crate::model::provider::ProviderDef::Llm { prompt, command, .. } => {
+                        if let Some(p) = prompt { text.push_str(p); text.push(' '); }
+                        text.push_str(command);
+                    }
+                    crate::model::provider::ProviderDef::Subprocess { command }
+                    | crate::model::provider::ProviderDef::Shell { command } => {
+                        text.push_str(command);
+                    }
+                    _ => {}
+                }
+            }
+            // Extract {{inputs.X}} references
+            let mut referenced: HashSet<String> = HashSet::new();
+            let mut rest = text.as_str();
+            while let Some(start) = rest.find("{{inputs.") {
+                let after = &rest[start + 10..];
+                if let Some(end) = after.find("}}") {
+                    referenced.insert(after[..end].to_string());
+                    rest = &after[end + 2..];
+                } else {
+                    rest = after;
+                }
+            }
+            // Check each reference
+            let incoming: HashSet<&str> = def
+                .dataflows
+                .iter()
+                .filter(|df| df.to == node.id)
+                .map(|df| df.from.as_str())
+                .collect();
+            for src in &referenced {
+                if !incoming.contains(src.as_str()) && all_node_ids.contains(src.as_str()) {
+                    errors.push(ValidationError::ReferencedInputWithoutDataflow {
+                        node_id: node.id.clone(),
+                        source_id: src.clone(),
+                    });
+                }
             }
         }
     }
