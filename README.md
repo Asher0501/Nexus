@@ -45,7 +45,7 @@ graph TB
 
     subgraph Store["持久化"]
         SQLITE[(SQLite<br/>workflows + runs)]
-        LOG[log/run-{id}.log<br/>Raw Log]
+        LOG[log/run-id.log<br/>Raw Log]
     end
 
     CC -->|MCP| MCP
