@@ -71,7 +71,7 @@ impl NodeExecutor {
                 exe.run(ctx, timeout, node_id, chunk_tx).await
             }
             NodeExecutor::Http(_) => Err(SpawnError {
-                message: "HTTP executor not implemented".into(),
+                message: "HTTP provider is not yet implemented (reserved for future use)".into(),
             }),
         }
     }
