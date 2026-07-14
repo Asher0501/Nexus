@@ -20,7 +20,7 @@ JSON Workflow → Engine (DAG scheduler) → Nodes (execution)
 **Engine / 引擎**：DAG scheduling, edge matching (h_e+g_e), data routing, retry/timeout, convergence.
 **Engine does NOT / 引擎不管**：what nodes do internally. Nodes are black boxes following stdout JSON protocol.
 
-**llm_node.py**：receive `--cmd` → read stdin context → spawn CLI → forward output to log → regex extract route+content → write stdout.
+**llm_node.py**：receive `--cmd` → read stdin context → spawn CLI → forward output to log → multi-strategy extract route+content → if route missing/invalid → correction retry → write stdout.
 
 ## Node Output Protocol / 节点输出协议 (NON-NEGOTIABLE / 不可协商)
 
@@ -135,7 +135,7 @@ Returns `{run_id, dashboard_url, monitor_url}`。
 |---------|------|
 | Cycle never exits / 环路不退出 | Add `route_policy: {max_runs: N, then_route: "stop"}` |
 | Fix/worker node never starts | Match `exit_reason` exactly to LLM output `route` |
-| LLM route always empty / 始终为空 | Prompt must say "Output ONLY JSON with route field" |
+| LLM route always empty / 始终为空 | Wrapper auto-corrects: missing/invalid route triggers retry. Still, ensure prompt asks for JSON and `routes` list is declared. |
 | Downstream gets no data / 下游无数据 | Add `dataflows: [{from: X, to: Y}]` |
 | `{{inputs.X}}` not replaced / 未替换 | Check dataflows has `from: X, to: current_node` |
 | Validator: "exit not reachable" | Add exit signal node + exit edge from cycle |
