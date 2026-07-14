@@ -598,10 +598,18 @@ impl Engine {
                             let _ = tx.send(EngineEvent::NodeReady { node_id: target }).await;
                         }
                     });
+                } else if self.running_count() == 0 {
+                    // No edges matched and nothing running → deadlock.
+                    // Converge immediately instead of waiting for watchdog.
+                    tracing::warn!(
+                        target: "nexus::engine",
+                        node_id = ?self.scheduler.graph().node_weight(node_id).map(|n| n.id.as_str()),
+                        "spawn error exhausted retries, no downstream edge matched, deadlock"
+                    );
+                    self.scheduler.mark_pending_nodes_skipped();
                 }
             }
         }
-
     }
 
     /// Get a reference to the scheduler (for diagnostics / snapshot).
@@ -1300,14 +1308,22 @@ mod tests {
         let config = EngineConfig::new(Some(2), 3600, 3);
         let mut engine = Engine::new(def, config, None).expect("valid workflow");
 
-        // With correct All semantics, engine.run() should NOT converge
-        // (C remains Pending because A's edge never fires). The 5s timeout
-        // should elapse, proving the engine is stuck waiting.
-        let result = tokio::time::timeout(Duration::from_secs(5), engine.run()).await;
-
+        // With All semantics, A fails → A's Complete edge never fires.
+        // B completes → B's edge fires but fan_in_pending stays > 0.
+        // C stays Pending.  Deadlock detection kicks in immediately
+        // (no ready nodes, nothing running) → C is Skipped.
+        let result = engine.run().await;
         assert!(
-            result.is_err(),
-            "engine should NOT converge when A fails and C requires both A and B (All semantics)"
+            result.is_ok(),
+            "engine should converge immediately via deadlock detection: {:?}",
+            result
+        );
+        let snapshot = &result.unwrap().snapshot;
+        let c_status = snapshot.nodes.get("C").map(|n| n.status);
+        assert_eq!(
+            c_status,
+            Some(crate::graph::scheduler::NodeStatus::Skipped),
+            "C should be Skipped due to deadlock detection"
         );
     }
 
