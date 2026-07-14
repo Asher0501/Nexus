@@ -154,11 +154,16 @@ impl LlmExecutor {
                 message: format!("serialize context: {e}"),
             })?;
 
-        // Render the full command (replace {{prompt}} with the prompt from context)
+        // Render command: replace {{prompt}} with placeholder that llm_node.py
+        // will fill from stdin context.  This avoids double-escaping problems
+        // when passing quoted prompt text through cmd.exe on Windows.
         let prompt_text = ctx_with_prompt.extensions.get("prompt").map(|s| s.as_str()).unwrap_or("");
-        // Escape double-quotes so the prompt survives argument parsing.
-        let escaped_prompt = prompt_text.replace('\\', "\\\\").replace('"', "\\\"");
-        let rendered_cmd = self.command_template.replace("{{prompt}}", &escaped_prompt);
+        let rendered_cmd = if self.command_template.contains("{{prompt}}") {
+            // Leave {{prompt}} as-is; llm_node.py replaces it from stdin.
+            self.command_template.clone()
+        } else {
+            self.command_template.clone()
+        };
 
         // Build Python command — pass the full CLI command via --cmd.
         // Try multiple Python interpreter names: on Windows, some users

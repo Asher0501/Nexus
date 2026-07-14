@@ -91,6 +91,32 @@ def _parse_cmd_for_exe(cmd_path: str) -> str | None:
 # Subprocess execution — any CLI, any platform
 # ═══════════════════════════════════════════════════════════════════
 
+def run_cmd_list(cmd_str: str) -> subprocess.Popen:
+    """Split command into argv list and spawn WITHOUT shell.
+    Uses shlex-like splitting so -p \"...\" args preserve their quotes."""
+    import shlex
+    try:
+        argv = shlex.split(cmd_str, posix=False)
+    except ValueError:
+        # Fallback: simple space split
+        argv = cmd_str.split()
+    if not argv:
+        raise FileNotFoundError("empty command")
+    # Resolve the program path
+    program = argv[0]
+    resolved = shutil.which(program)
+    if resolved:
+        argv[0] = resolved
+    emit_stderr(f"[llm_node] {os.path.basename(argv[0])}")
+    return subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
 def emit_stderr(line: str):
     print(line, file=sys.stderr, flush=True)
 
@@ -293,13 +319,23 @@ def main():
         sys.stdout.write(json.dumps({"route": "error", "content": "no --cmd provided"}))
         sys.exit(1)
 
+    # Replace {{prompt}} placeholder with prompt from stdin context.
+    # Escape quotes in the prompt so they survive subprocess argument parsing.
+    prompt = ctx.get("extensions", {}).get("prompt", "")
+    if prompt and "{{prompt}}" in cmd_str:
+        safe_prompt = prompt.replace("\\", "\\\\").replace("\"", "\\\"")
+        cmd_str = cmd_str.replace("{{prompt}}", safe_prompt)
+
+    # Split into program + args to avoid shell quoting issues.
+    # This bypasses cmd.exe on Windows — each argument is passed directly.
     try:
-        proc = run_cmd(cmd_str)
+        proc = run_cmd_list(cmd_str)
     except FileNotFoundError as e:
         sys.stdout.write(json.dumps({"route": "error", "content": f"not found: {e}"}))
         sys.exit(1)
 
     stdout_text = stream_stdout_and_stderr(proc, args.timeout)
+    emit_stderr(f"[llm_node] captured {len(stdout_text)} chars from stdout")
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
