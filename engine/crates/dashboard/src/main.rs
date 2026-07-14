@@ -39,7 +39,19 @@ use ws::WsRoom;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    let _ = std::fs::create_dir_all("log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open("log/dashboard.log")
+        .expect("open log/dashboard.log");
+    let log_file = std::sync::Mutex::new(log_file);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("nexus::nodeshell=debug,nexus::node=debug,info"));
+    tracing_subscriber::fmt()
+        .with_writer(log_file)
+        .with_env_filter(filter)
+        .with_target(true)
+        .init();
 
     let store = db::Store::new(None).expect("SQLite store initialization failed");
     let room = WsRoom::new();

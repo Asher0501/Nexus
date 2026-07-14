@@ -211,6 +211,14 @@ impl SubprocessExecutor {
         // `python scripts/xxx.py` works regardless of CWD.
         let command = Self::resolve_scripts_path(&command);
 
+        tracing::info!(
+            target: "nexus::nodeshell",
+            node_id,
+            command = %command,
+            shell = self.shell,
+            "spawning node"
+        );
+
         let mut cmd = if self.shell {
             // Shell mode: pass the entire command directly to the shell.
             // Do NOT split — the shell handles quoting, pipes, redirects, etc.
@@ -338,6 +346,7 @@ async fn collect_and_wait(
     if !stderr.is_empty() {
         tracing::warn!(target: "nexus::node::stderr", node_id, stderr = %stderr);
     }
+    tracing::info!(target: "nexus::node::stdout", node_id, stdout_len = stdout.len(), stdout_head = %stdout.chars().take(200).collect::<String>());
 
     let output = if exit_code == exit_codes::TIMEOUT {
         NodeOutput {

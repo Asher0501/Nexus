@@ -939,6 +939,7 @@ name = "nexus-mcp-server"
 version = "0.1.0"
 dependencies = [
  "nexus-engine",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

@@ -98,9 +98,33 @@ const STATUS_COLORS = {
 
 // ── State ───────────────────────────────────────────────────────
 let dagNetwork = null, dagNodes = null, dagEdges = null;
-let dagReady = false, pendingStatuses = []; // buffer before DAG init
+let dagReady = false, pendingStatuses = [];
 let logs = [], wsConnection = null;
-let nodeStates = {}; // node_id → {status, lastUpdate} for compact status panel
+let nodeStates = {};
+let activeRunId = null;
+
+// Persist logs + node states to sessionStorage so they survive refresh.
+function saveState() {
+  if (!activeRunId) return;
+  try {
+    sessionStorage.setItem('nexus_runId', activeRunId);
+    sessionStorage.setItem('nexus_logs', JSON.stringify(logs.slice(-300)));
+    sessionStorage.setItem('nexus_nodes', JSON.stringify(nodeStates));
+  } catch(_) {}
+}
+function loadState(runId) {
+  try {
+    if (sessionStorage.getItem('nexus_runId') === runId) {
+      logs = JSON.parse(sessionStorage.getItem('nexus_logs') || '[]');
+      nodeStates = JSON.parse(sessionStorage.getItem('nexus_nodes') || '{}');
+      return true;
+    }
+  } catch(_) {}
+  return false;
+}
+function clearState() {
+  try { sessionStorage.removeItem('nexus_runId'); sessionStorage.removeItem('nexus_logs'); sessionStorage.removeItem('nexus_nodes'); } catch(_) {}
+}
 
 // ── API ─────────────────────────────────────────────────────────
 async function api(method, path, body) {
@@ -312,7 +336,11 @@ async function renderRuns() {
 // ── Run Monitor ─────────────────────────────────────────────────
 async function renderRunMonitor(runId) {
   if (wsConnection) { wsConnection.close(); wsConnection = null; }
-  logs = []; nodeStates = {};
+  activeRunId = runId;
+  // Try restoring previous state (survives refresh via sessionStorage)
+  if (!loadState(runId)) {
+    logs = []; nodeStates = {};
+  }
 
   let run;
   try { run = await GET('/api/runs/' + runId); } catch(e) { showError('Run not found'); return; }
@@ -341,7 +369,8 @@ async function renderRunMonitor(runId) {
       </div>
     </div>`;
 
-  renderStatusPanel(); // Show initial Pending states from graph data
+  renderStatusPanel();
+  renderLogs(); // Restore logs from sessionStorage if any
   if (graph.nodes && graph.nodes.length) initDAG('dag-live', graph);
   connectWS(runId);
 }
@@ -457,6 +486,7 @@ function initDAG(containerId, graphData) {
 
 function updateNodeStatus(nodeId, status) {
   nodeStates[nodeId] = { status, ts: Date.now() };
+  saveState();
   renderStatusPanel();
   if (dagReady && dagNodes) {
     dagNodes.update({ id: nodeId, color: { background: STATUS_COLORS[status] || '#64748b' } });
@@ -530,12 +560,23 @@ function connectWS(runId) {
 function appendLog(nodeId, text, ts) {
   logs.push({ nodeId, text, ts });
   if (logs.length > 500) logs.shift();
+  saveState();
   const panel = document.getElementById('log-panel');
   if (!panel) return;
   const t = ts ? new Date(ts * 1000).toLocaleTimeString() : '';
   panel.innerHTML = logs.map(l =>
     '<div class="log-line"><span class="log-ts">' + t + '</span><span class="log-node">[' + esc(l.nodeId) + ']</span><span class="log-text">' + esc(l.text) + '</span></div>'
   ).join('');
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function renderLogs() {
+  const panel = document.getElementById('log-panel');
+  if (!panel || !logs.length) return;
+  panel.innerHTML = logs.map(function(l) {
+    var t = l.ts ? new Date(l.ts * 1000).toLocaleTimeString() : '';
+    return '<div class="log-line"><span class="log-ts">' + t + '</span><span class="log-node">[' + esc(l.nodeId) + ']</span><span class="log-text">' + esc(l.text) + '</span></div>';
+  }).join('');
   panel.scrollTop = panel.scrollHeight;
 }
 

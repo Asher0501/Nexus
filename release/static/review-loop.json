@@ -10,7 +10,7 @@
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are a design critic (Round {{metadata.run_count}}/3). Review this design doc for: 1) consistent abstraction altitude, 2) non-obvious value per claim, 3) logical gaps.\n\nDocument:\n{{inputs.start}}\n\nPrevious fix:\n{{inputs.fix}}\n\nIf issues found: route='needs_fix'. If all good: route='done'.\nOutput: {\"route\":\"needs_fix|done\",\"content\":\"## Round {{metadata.run_count}}\\n...\"}",
+        "prompt": "You are a design critic (Round {{metadata.run_count}}/3). Review this document for: 1) consistent abstraction altitude, 2) non-obvious value per claim, 3) logical gaps.\n\nDocument:\n{{inputs.start}}\n\nPrevious fix:\n{{inputs.fix}}\n\nIf issues found: route='needs_fix'. All good: route='done'.\nOutput ONLY: {\"route\":\"needs_fix|done\",\"content\":\"## Round {{metadata.run_count}}\\n...\"}",
         "routes": ["needs_fix", "done"]
       }],
       "process_timeout_secs": 180,
@@ -21,7 +21,7 @@
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are a design editor. Rewrite sections based on the review. Original doc for context:\n\n{{inputs.start}}\n\nReview:\n{{inputs.review}}\n\nOutput: {\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\\n...\"}",
+        "prompt": "You are a design editor. Rewrite sections based on review.\n\nReview:\n{{inputs.review}}\n\nOriginal:\n{{inputs.start}}\n\nOutput ONLY: {\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\\n...\"}",
         "routes": ["fixed"]
       }],
       "process_timeout_secs": 180
