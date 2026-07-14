@@ -55,7 +55,11 @@ async fn main() {
 
     let store = db::Store::new(None).expect("SQLite store initialization failed");
     let room = WsRoom::new();
-    let state = AppState { store, room };
+    let state = AppState {
+        store,
+        room,
+        cancel_flags: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+    };
 
     let app = Router::new()
         .route("/ws/runs/{run_id}", get(ws::ws_handler))

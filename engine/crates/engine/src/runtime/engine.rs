@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -108,6 +109,8 @@ pub struct Engine {
     event_cb: Option<NodeEventCb>,
     /// Wall-clock time when `run()` started (None before first run).
     started_at: Option<Instant>,
+    /// External cancellation flag. Set to true to stop the engine.
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for Engine {
@@ -132,15 +135,26 @@ impl Engine {
 
     /// Create a new `Engine` from a [`WorkflowDef`] and [`EngineConfig`].
     ///
-    /// # Errors
-    ///
-    /// Returns a vector of [`ValidationError]s if the workflow definition
-    /// cannot be built into a valid graph.
+    /// Convenience wrapper — discards the cancel handle. Use
+    /// [`Engine::new_with_cancel`] if you need to stop the engine externally.
     pub fn new(
         def: WorkflowDef,
         config: EngineConfig,
         event_cb: Option<NodeEventCb>,
     ) -> Result<Self, Vec<ValidationError>> {
+        Self::new_with_cancel(def, config, event_cb).map(|(e, _)| e)
+    }
+
+    /// Create a new `Engine` returning the cancel handle alongside.
+    /// Set the handle to `true` to stop the engine at the next event-loop
+    /// iteration — all pending nodes are marked Skipped and the engine
+    /// converges.
+    pub fn new_with_cancel(
+        def: WorkflowDef,
+        config: EngineConfig,
+        event_cb: Option<NodeEventCb>,
+    ) -> Result<(Self, Arc<AtomicBool>), Vec<ValidationError>> {
+        let cancel_flag = Arc::new(AtomicBool::new(false));
         let graph = crate::graph::Builder::build(&def)?;
         let node_id_to_index: HashMap<String, NodeIndex> = graph
             .node_indices()
@@ -161,7 +175,8 @@ impl Engine {
 
         let (tx, rx) = mpsc::channel(capacity);
 
-        Ok(Self {
+        let handle = cancel_flag.clone();
+        Ok((Self {
             scheduler,
             data_router,
             config,
@@ -170,7 +185,8 @@ impl Engine {
             event_rx: rx,
             event_cb,
             started_at: None,
-        })
+            cancel_flag,
+        }, handle))
     }
 
     /// Run the workflow to completion.
@@ -193,6 +209,12 @@ impl Engine {
         let mut consecutive_timeouts: u32 = 0;
 
         loop {
+            // External cancellation — kill running nodes and converge.
+            if self.cancel_flag.load(Ordering::Relaxed) {
+                tracing::warn!(target: "nexus::engine", "cancelled by external request, stopping");
+                self.scheduler.mark_pending_nodes_skipped();
+                break;
+            }
             // Check convergence via scheduler — the single source of truth.
             if self.scheduler.is_converged() {
                 break;

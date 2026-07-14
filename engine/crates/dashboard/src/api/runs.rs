@@ -33,11 +33,12 @@ pub async fn list(
 ///
 /// Optional JSON body: `{"max_concurrency": N}` to override the default concurrency.
 pub async fn trigger(
-    State(store): State<Store>,
-    State(room): State<Arc<WsRoom>>,
+    State(state): State<crate::state::AppState>,
     Path(wf_id): Path<String>,
     body: Option<Json<Value>>,
 ) -> (StatusCode, Json<Value>) {
+    let store = state.store.clone();
+    let room = state.room.clone();
     let store_for_wf = store.clone();
     let wf_id_for_wf = wf_id.clone();
     let wf = match tokio::task::spawn_blocking(move || store_for_wf.get_workflow(&wf_id_for_wf)).await {
@@ -86,6 +87,9 @@ pub async fn trigger(
         }
     }
 
+    // Register cancel flag before spawning.
+    let cancel_flag = state.register_cancel(&run_id);
+
     // Run the workflow in the background — does not block the HTTP response.
     let def = wf.definition.clone();
     let store_clone = store.clone();
@@ -96,7 +100,7 @@ pub async fn trigger(
         .map(|n| n as usize);
     tokio::spawn(async move {
         let config = EngineConfig::new(max_concurrency, 3600, 3);
-        match engine_bridge::run_workflow(&def, config, room_clone, &run_id_clone).await {
+        match engine_bridge::run_workflow(&def, config, room_clone, &run_id_clone, Some(cancel_flag)).await {
             Ok(_) => {
                 if let Err(e) = store_clone.finish_run(&run_id_clone, "completed", None) {
                     tracing::error!("[Runs] finish_run failed: {e}");
@@ -160,16 +164,21 @@ pub async fn get_by_id(
 }
 
 /// POST /api/runs/{run_id}/stop — stop a running workflow.
-///
-/// Not yet implemented — the engine does not currently expose a cancellation
-/// handle.  Returns 501 Not Implemented until runtime cancellation is wired.
 pub async fn stop(
+    State(state): State<crate::state::AppState>,
     Path(run_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"run_id": run_id, "error": "stop is not yet implemented"})),
-    )
+    if state.cancel_run(&run_id) {
+        (
+            StatusCode::OK,
+            Json(json!({"run_id": run_id, "status": "stopping"})),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"run_id": run_id, "error": "run not found or already completed"})),
+        )
+    }
 }
 
 /// GET /api/runs/{run_id}/graph — live graph status for a run.
