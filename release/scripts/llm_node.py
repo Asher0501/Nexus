@@ -91,35 +91,6 @@ def _parse_cmd_for_exe(cmd_path: str) -> str | None:
 # Subprocess execution — any CLI, any platform
 # ═══════════════════════════════════════════════════════════════════
 
-def run_cmd_list(cmd_str: str) -> subprocess.Popen:
-    """Split command into argv list and spawn WITHOUT shell.
-    Uses shlex-like splitting so -p \"...\" args preserve their quotes."""
-    import shlex
-    try:
-        argv = shlex.split(cmd_str)
-    except ValueError:
-        # Fallback: simple space split
-        argv = cmd_str.split()
-    if not argv:
-        raise FileNotFoundError("empty command")
-    # Resolve the program path
-    program = argv[0]
-    resolved = shutil.which(program)
-    if resolved:
-        argv[0] = resolved
-    # .CMD/.BAT must go through cmd.exe on Windows
-    if sys.platform == "win32" and os.path.splitext(argv[0])[1].lower() in (".cmd", ".bat"):
-        argv = ["cmd.exe", "/c"] + argv
-    emit_stderr(f"[llm_node] {os.path.basename(argv[0])}")
-    return subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-
 def emit_stderr(line: str):
     print(line, file=sys.stderr, flush=True)
 
@@ -255,10 +226,8 @@ def main():
         safe_prompt = prompt.replace("\\", "\\\\").replace("\"", "\\\"")
         cmd_str = cmd_str.replace("{{prompt}}", safe_prompt)
 
-    # Split into program + args to avoid shell quoting issues.
-    # This bypasses cmd.exe on Windows — each argument is passed directly.
     try:
-        proc = run_cmd_list(cmd_str)
+        proc = run_cmd(cmd_str)
     except FileNotFoundError as e:
         sys.stdout.write(json.dumps({"route": "error", "content": f"not found: {e}"}))
         sys.exit(1)
