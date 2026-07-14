@@ -123,7 +123,11 @@ release/
 - **Windows 10+ (x86_64)** — 提供预编译二进制文件
 - **Linux / macOS** — 需从源码构建（见下方构建说明）
 - 预编译二进制文件开箱即用，无需安装 VC++ Redistributable 等额外运行时
-- `type: "llm"` 节点和示例脚本需要系统安装 **Python 3**（引擎通过内置 `scripts/llm_node.py` wrapper 调用 LLM CLI）
+- **`type: "llm"` 节点依赖**：
+  - **Python 3** — 引擎通过内置 `scripts/llm_node.py` wrapper 调用 LLM CLI。需在系统 PATH 中
+  - **Claude Code CLI** (`claude`) — LLM 节点的默认 CLI。通过 npm 安装：`npm install -g @anthropic-ai/claude-code`
+  - 也可替换为其他 CLI（opencode、nga 等），修改 `command` 字段即可
+- **`.bat` 脚本仅适用于 Windows**。Linux/macOS 需用 shell 等价脚本（如 `echo '{"route":"ok","content":"done"}'`）
 - 二进制文件可放到任意目录或加入 `PATH`。命令中的 `scripts/` 相对路径会自动解析为 exe 所在目录的 `../scripts/`，无需特意 cd 到 release 目录
 - 如使用自定义 `scripts/` 路径，可通过 `NEXUS_LLM_WRAPPER` 环境变量覆盖
 
