@@ -15,32 +15,59 @@
 
 ```mermaid
 graph TB
-    subgraph "Claude Code"
-        CC[Claude Agent]
+    subgraph External["外部"]
+        CC[Claude Agent<br/>MCP Client]
+        Browser[Browser<br/>Dashboard]
+        Terminal[Terminal<br/>CLI]
     end
 
-    subgraph "Nexus"
+    subgraph Interface["接口层"]
         MCP[nexus-mcp-server<br/>stdio JSON-RPC]
-        CLI[nexus-cli<br/>命令行]
-        DASH[nexus-dashboard<br/>HTTP :48080]
-
-        subgraph "Engine Core"
-            SCHED[Scheduler<br/>h_e + g_e 调度]
-            ROUTER[DataRouter<br/>数据流]
-            SHELL[NodeShell<br/>subprocess / LLM]
-        end
+        DASH[nexus-dashboard<br/>REST + WebSocket :48080]
+        CLI[nexus-cli<br/>clap 命令行]
     end
 
-    CC -->|MCP Protocol| MCP
-    MCP --> SCHED
-    CLI --> SCHED
-    SCHED --> ROUTER
-    SCHED --> SHELL
-    SHELL -->|stdout JSON| ROUTER
+    subgraph Runtime["运行时"]
+        ENGINE[runtime::Engine<br/>事件循环 + 并发控制]
+        SCHED[graph::Scheduler<br/>h_e + g_e 转移函数]
+        ROUTER[graph::DataRouter<br/>数据流存储与转发]
+    end
 
-    DASH -->|REST| SCHED
-    DASH -->|WebSocket| SCHED
-    CC -.->|monitor_url| DASH
+    subgraph Graph["图编译"]
+        VALIDATOR[graph::Validator<br/>10 项结构检查]
+        BUILDER[graph::Builder<br/>GraphDef 不变量构造]
+    end
+
+    subgraph Exec["节点执行"]
+        LLM[LlmExecutor<br/>llm_node.py wrapper]
+        SUB[SubprocessExecutor<br/>subprocess / shell]
+    end
+
+    subgraph Store["持久化"]
+        SQLITE[(SQLite<br/>workflows + runs)]
+        LOG[log/run-{id}.log<br/>Raw Log]
+    end
+
+    CC -->|MCP| MCP
+    Browser -->|HTTP/WS| DASH
+    Terminal -->|args| CLI
+
+    MCP --> ENGINE
+    DASH --> ENGINE
+    CLI --> ENGINE
+
+    ENGINE --> SCHED
+    ENGINE --> ROUTER
+    VALIDATOR --> BUILDER
+    BUILDER --> ENGINE
+
+    SCHED --> LLM
+    SCHED --> SUB
+    LLM -->|stdout JSON| ROUTER
+    SUB -->|stdout JSON| ROUTER
+
+    DASH --> SQLITE
+    DASH --> LOG
 ```
 
 ## 定位
@@ -74,21 +101,6 @@ graph LR
 ```
 
 > 8 节点 DAG：fan-out → fan-in → 有向环 → exit_reason 分支路由 → 退出。
-
-## 三个二进制
-
-```mermaid
-graph LR
-    subgraph "nexus-cli"
-        C1[命令行执行<br/>--verbose --validate-only --dump-state]
-    end
-    subgraph "nexus-mcp-server"
-        C2[stdio JSON-RPC<br/>validate / parse / describe / run]
-    end
-    subgraph "nexus-dashboard"
-        C3[REST API + WebSocket<br/>DAG 实时可视化<br/>端口 48080]
-    end
-```
 
 ## Claude Code 集成流程
 
