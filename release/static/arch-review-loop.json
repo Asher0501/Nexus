@@ -10,7 +10,7 @@
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are an architecture reviewer (Round {{metadata.run_count}}/2). Critique the Nexus architecture document for: 1) layer separation clarity, 2) design decision rationale, 3) missing edge cases or contradictions.\n\nDocument:\n{{inputs.start}}\n\nPrevious fix:\n{{inputs.fix}}\n\nIf issues found: route='needs_fix'. If architecture is sound: route='done'.\nOutput ONLY: {\"route\":\"needs_fix|done\",\"content\":\"## Review Round {{metadata.run_count}}\\n\\n### Layer Separation\\n...\\n### Design Rationale\\n...\\n### Gaps & Contradictions\\n...\\n### Verdict: NEEDS_FIX | DONE\"}",
+        "prompt": "You are an architecture reviewer (Round {{metadata.run_count}}/2). Critique the Nexus architecture document. Write your review to review.md (append mode, use Bash: cat >> review.md << 'EOF' ... EOF).\n\nDocument:\n{{inputs.start}}\n\nPrevious fix:\n{{inputs.fix}}\n\nIf issues found output route='needs_fix'. If architecture is sound after round 2 output route='done'.\nOutput ONLY: {\"route\":\"needs_fix|done\",\"content\":\"## Review Round {{metadata.run_count}}\n...\"}",
         "routes": ["needs_fix", "done"]
       }],
       "process_timeout_secs": 300,
@@ -21,29 +21,21 @@
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are an architecture editor. Based on the review, propose concrete improvements. Rewrite the problematic sections with better clarity.\n\nReview:\n{{inputs.review}}\n\nOriginal document:\n{{inputs.start}}\n\nOutput ONLY: {\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\\n\\n### Issues Addressed\\n...\\n### Rewritten Sections\\n...\"}",
+        "prompt": "You are an architecture editor. Based on review, propose concrete improvements. Write your fixes to fix.md (append mode, use Bash: cat >> fix.md << 'EOF' ... EOF).\n\nReview:\n{{inputs.review}}\n\nOriginal document:\n{{inputs.start}}\n\nOutput ONLY: {\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\n...\"}",
         "routes": ["fixed"]
       }],
       "process_timeout_secs": 300
-    },
-    {
-      "id": "report",
-      "providers": [{ "type": "shell", "command": "python scripts/write_report.py" }],
-      "process_timeout_secs": 10
     }
   ],
   "edges": [
     { "from": "start",  "to": "review", "trigger": "any", "event": "complete" },
     { "from": "review", "to": "fix",    "trigger": "any", "event": "complete", "exit_reason": "needs_fix" },
-    { "from": "fix",    "to": "review", "trigger": "any", "event": "complete" },
-    { "from": "review", "to": "report", "trigger": "any", "event": "complete", "exit_reason": "done" }
+    { "from": "fix",    "to": "review", "trigger": "any", "event": "complete" }
   ],
   "dataflows": [
     { "from": "start",  "to": "review" },
     { "from": "start",  "to": "fix" },
     { "from": "fix",    "to": "review" },
-    { "from": "review", "to": "fix" },
-    { "from": "review", "to": "report" },
-    { "from": "fix",    "to": "report" }
+    { "from": "review", "to": "fix" }
   ]
 }

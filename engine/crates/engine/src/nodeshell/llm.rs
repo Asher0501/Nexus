@@ -359,7 +359,7 @@ mod tests {
             "claude -p \"{{prompt}}\"",
             Some("Review: {{inputs.seed}}".into()),
             vec!["ok".into(), "err".into()],
-            None,
+            None, None,
         );
         let built = exe.build_context(&ctx);
         assert_eq!(built.extensions.get("prompt").unwrap(), "Review: hello");

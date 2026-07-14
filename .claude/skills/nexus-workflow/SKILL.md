@@ -161,6 +161,10 @@ Two approaches, both valid:
 
 Returns `{run_id, dashboard_url, monitor_url}`.
 
+## Validator Constraints
+
+- **Exit reachable**: every node must have a path to at least one exit node (node with 0 outgoing edges). Cycles need an exit edge → signal node. Otherwise validator rejects with "exit not reachable".
+
 ## Common Pitfalls
 
 | Symptom | Root cause | Fix |

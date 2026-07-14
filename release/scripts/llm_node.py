@@ -178,15 +178,15 @@ def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 ROUTE_RE = re.compile(
-    r'\{[^{}]*"route"\s*:\s*"([^"]*)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"[^{}]*\}',
+    r'"route"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"',
     re.DOTALL,
 )
 
 def parse_text_output(stdout: str) -> dict:
-    """Search ALL output for a JSON object with route and content fields."""
-    # 1. Try direct JSON parse (covers clean single-line output)
+    """Search ALL output for route+content JSON, anywhere."""
+    # 1. Try direct JSON parse of the entire output
     stripped = stdout.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
+    if stripped.startswith("{"):
         try:
             obj = json.loads(stripped)
             if "route" in obj:
@@ -194,15 +194,18 @@ def parse_text_output(stdout: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # 2. Regex: find {"route":"...","content":"..."} anywhere in the output
+    # 2. Regex: find "route":"...","content":"..." anywhere, even nested in NDJSON
     for m in ROUTE_RE.finditer(stdout):
+        route = m.group(1)
+        # Unescape JSON string escapes (\", \\, \n, etc.)
+        content_raw = m.group(2)
         try:
-            obj = json.loads(m.group(0))
-            return {"route": str(obj["route"]), "content": str(obj.get("content", ""))}
+            content = json.loads('"' + content_raw + '"')
         except json.JSONDecodeError:
-            continue
+            content = content_raw
+        return {"route": route, "content": content}
 
-    # 3. Fallback: no route found
+    # 3. Fallback
     return {"route": "", "content": stripped}
 
 
