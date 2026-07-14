@@ -233,12 +233,17 @@ def main():
         proc.kill()
 
     output = parse_text_output(stdout_text)
+    expected_routes = ctx.get("extensions", {}).get("route", "")  # "again,stop"
 
-    # If no route found, retry with a short correction prompt.
-    # The second call is cheap (~1s) and nearly guaranteed to produce valid JSON.
-    if not output.get("route") and cmd_str:
-        emit_stderr("[llm_node] no route found, retrying with correction prompt")
-        correction = 'Output EXACTLY this JSON and nothing else: {\"route\":\"ok\",\"content\":\"done\"}'
+    # If route is missing or not in expected list, retry with correction.
+    route_ok = output.get("route") and (
+        not expected_routes or output["route"] in expected_routes.split(",")
+    )
+    if not route_ok and cmd_str:
+        emit_stderr(f"[llm_node] route={output.get('route','')} invalid/missing, retrying")
+        # Build correction prompt targeting a valid route
+        target = expected_routes.split(",")[0].strip() if expected_routes else "ok"
+        correction = f'Output EXACTLY this JSON: {{"route":"{target}","content":"done"}}'
         try:
             proc2 = run_cmd(cmd_str, stdin_text=correction)
         except Exception:
@@ -250,9 +255,12 @@ def main():
             except subprocess.TimeoutExpired:
                 proc2.kill()
             output2 = parse_text_output(stdout2_text)
-            if output2.get("route"):
+            route2 = output2.get("route", "")
+            if route2 and (not expected_routes or route2 in expected_routes.split(",")):
                 output = output2
-                emit_stderr(f"[llm_node] correction succeeded: route={output2['route']}")
+                emit_stderr(f"[llm_node] correction OK: route={route2}")
+            else:
+                emit_stderr(f"[llm_node] correction failed: route={route2}")
 
     sys.stdout.write(json.dumps(output, ensure_ascii=False))
 
