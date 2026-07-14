@@ -140,7 +140,44 @@ echo '{"jsonrpc":"2.0","method":"validate_workflow","params":{"workflow_json":"{
 
 使用 `type: "llm"` 可将任意 LLM CLI 作为工作流节点。引擎通过 `scripts/llm_node.py` 自动处理跨平台 CLI 发现、输出解析和路由。
 
-> **依赖**：LLM 节点需要系统安装 Python 3。
+> **依赖**：LLM 节点需要系统安装 Python 3 + Claude Code CLI。
+
+## 示范工作流
+
+Dashboard 内置了三个可从 `static/` 导入的示范工作流，覆盖 Nexus 全部特性：
+
+### c2 — Fan-out / Fan-in + 有向环
+
+`seed → fan → w1,w2 → merge → review ⇄ fix → exit`
+
+| 特性 | 位置 |
+|------|------|
+| fan-out / fan-in (`trigger: "all"`) | merge 节点 |
+| 有向环 (review⇄fix) | `route_policy.max_runs=3` 控制退出 |
+| exit_reason 路由 | `"again"` → fix, `"stop"` → exit |
+| 文件输出 (prompt) | review → review.md, fix → fix.md |
+
+### c3 — 条件分支 + 自环 + Failed 边
+
+`go → split → A(llm) ⇄ A_self → merge ← B(subprocess) ← fallback → final → exit`
+
+| 特性 | 位置 |
+|------|------|
+| 条件分支 | split 按 route `"a"`/`"b"` 路由 |
+| 自环 + threshold | A → A_self → A, `threshold:2` |
+| `subprocess` provider | B 节点 |
+| `event: "failed"` 边 | B → fallback |
+| dataflow alias | `a_out`/`b_out` |
+
+### c4 — Timeout + Retry + 恢复
+
+`go → risky(sleep3.bat, timeout=1s, max_retries=1) → fallback → fallback_report → exit`
+
+| 特性 | 位置 |
+|------|------|
+| `event: "timeout"` 边 | risky → fallback |
+| `max_retries` (节点级) | `risky.max_retries: 1` |
+| `exit_reason: null` (匹配任意 route) | fallback 的出边 |
 
 ## 更多
 

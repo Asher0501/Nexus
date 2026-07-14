@@ -2,6 +2,12 @@
 
 Generate valid Nexus workflow JSON. Express ALL logic in the JSON — never modify the engine or `llm_node.py`.
 
+## Reference Docs
+
+- `release/WORKFLOW_REFERENCE.md` — complete schema, scheduling semantics, mode templates, edge cases (~1200 lines)
+- `release/QUICKSTART.md` — 5-minute quickstart + c2/c3/c4 demo workflows covering all features
+- `release/README.md` — API reference, system requirements, build instructions
+
 ## Architecture Principle
 
 ```
