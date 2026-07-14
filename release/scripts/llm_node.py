@@ -96,7 +96,7 @@ def run_cmd_list(cmd_str: str) -> subprocess.Popen:
     Uses shlex-like splitting so -p \"...\" args preserve their quotes."""
     import shlex
     try:
-        argv = shlex.split(cmd_str, posix=False)
+        argv = shlex.split(cmd_str)
     except ValueError:
         # Fallback: simple space split
         argv = cmd_str.split()
@@ -107,6 +107,9 @@ def run_cmd_list(cmd_str: str) -> subprocess.Popen:
     resolved = shutil.which(program)
     if resolved:
         argv[0] = resolved
+    # .CMD/.BAT must go through cmd.exe on Windows
+    if sys.platform == "win32" and os.path.splitext(argv[0])[1].lower() in (".cmd", ".bat"):
+        argv = ["cmd.exe", "/c"] + argv
     emit_stderr(f"[llm_node] {os.path.basename(argv[0])}")
     return subprocess.Popen(
         argv,
