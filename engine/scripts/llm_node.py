@@ -151,13 +151,14 @@ def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 ROUTE_RE = re.compile(
-    r'"route"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"',
+    r'"?route"?\s*:\s*"?([^",}\s]+)"?\s*,\s*"?content"?\s*:\s*"((?:[^"\\]|\\.)*)"',
     re.DOTALL,
 )
 
 def parse_text_output(stdout: str) -> dict:
-    """Search ALL output for route+content JSON, anywhere."""
-    # 1. Try direct JSON parse of the entire output
+    """Search ALL output for route+content JSON, anywhere.
+    Handles standard JSON, unquoted keys, NDJSON escaped output."""
+    # 1. Try direct JSON parse
     stripped = stdout.strip()
     if stripped.startswith("{"):
         try:
@@ -167,12 +168,10 @@ def parse_text_output(stdout: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # 2. Normalize: unescape JSON string escapes.  In NDJSON, the route JSON
-    # appears as {\"route\":\"again\",...}.  Turn \" into plain " so the regex matches.
+    # 2. Normalize NDJSON escapes: \" → "
     unescaped = stdout.replace('\\"', '"').replace('\\\\', '\\')
     for m in ROUTE_RE.finditer(unescaped):
         route = m.group(1)
-        # Unescape JSON string escapes (\", \\, \n, etc.)
         content_raw = m.group(2)
         try:
             content = json.loads('"' + content_raw + '"')
@@ -180,7 +179,18 @@ def parse_text_output(stdout: str) -> dict:
             content = content_raw
         return {"route": route, "content": content}
 
-    # 3. Fallback
+    # 3. Last resort: search the raw stdout for unquoted keys
+    for m in re.finditer(
+        r'\broute\s*:\s*"?(\w+)"?\s*[,;]\s*content\s*:\s*"((?:[^"\\]|\\.)*)"',
+        stdout, re.DOTALL
+    ):
+        content_raw = m.group(2)
+        try:
+            content = json.loads('"' + content_raw + '"')
+        except json.JSONDecodeError:
+            content = content_raw
+        return {"route": m.group(1), "content": content}
+
     return {"route": "", "content": stripped}
 
 
@@ -223,6 +233,27 @@ def main():
         proc.kill()
 
     output = parse_text_output(stdout_text)
+
+    # If no route found, retry with a short correction prompt.
+    # The second call is cheap (~1s) and nearly guaranteed to produce valid JSON.
+    if not output.get("route") and cmd_str:
+        emit_stderr("[llm_node] no route found, retrying with correction prompt")
+        correction = 'Output EXACTLY this JSON and nothing else: {\"route\":\"ok\",\"content\":\"done\"}'
+        try:
+            proc2 = run_cmd(cmd_str, stdin_text=correction)
+        except Exception:
+            proc2 = None
+        if proc2:
+            stdout2_text = stream_stdout_and_stderr(proc2, args.timeout)
+            try:
+                proc2.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc2.kill()
+            output2 = parse_text_output(stdout2_text)
+            if output2.get("route"):
+                output = output2
+                emit_stderr(f"[llm_node] correction succeeded: route={output2['route']}")
+
     sys.stdout.write(json.dumps(output, ensure_ascii=False))
 
 
