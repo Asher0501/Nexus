@@ -16,7 +16,7 @@
         {
           "type": "llm",
           "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-          "prompt": "Review this code for bugs: {{inputs.seed}}. Reply with JSON: {\"route\":\"approved|rejected\",\"content\":\"review notes\"}",
+          "prompt": "Review this code for bugs: {{datarouter.seed.content}}. Reply with JSON: {\"route\":\"approved|rejected\",\"content\":\"review notes\"}",
           "routes": ["approved", "rejected"]
         }
       ],

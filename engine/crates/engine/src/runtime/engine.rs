@@ -318,6 +318,7 @@ impl Engine {
         }
 
         let inputs = self.data_router.build_input(node_id);
+        let upstream = self.data_router.build_upstream(node_id);
 
         let tx = self.event_tx.clone();
 
@@ -363,7 +364,10 @@ impl Engine {
                     if let Some(count) = self.scheduler.state_mut().run_counts.get_mut(&node_id) {
                         *count = ctx_run_count;
                     }
-                    self.data_router.store_output(node_id, "");
+                    self.data_router.store_output(node_id, &crate::nodeshell::NodeOutput {
+                        route: then_route.clone(),
+                        content: String::new(),
+                    });
                     let outcome = crate::nodeshell::NodeOutcome {
                         output: crate::nodeshell::NodeOutput {
                             route: then_route.clone(),
@@ -402,6 +406,7 @@ impl Engine {
                 run_count: ctx_run_count,
                 timed_out: ctx_timed_out,
             },
+            upstream,
         };
 
         // Guard: skip if already running — prevents concurrent
@@ -434,9 +439,14 @@ impl Engine {
         let chunk_node_id = nid.clone();
 
         // Spawn a consumer that forwards chunks to diagnostics and callbacks.
+        // Skips whitespace-only chunks (heartbeat keep-alives from llm_node.py).
         let chunk_cb = self.event_cb.clone();
         tokio::spawn(async move {
             while let Some(chunk) = chunk_rx.recv().await {
+                let trimmed = chunk.text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
                 tracing::info!(
                     target: "nexus::node::chunk",
                     node_id = chunk_node_id,
@@ -529,7 +539,7 @@ impl Engine {
                 if outcome.timed_out() {
                     self.scheduler.state_mut().last_timed_out.insert(node_id, true);
                 }
-                self.data_router.store_output(node_id, &outcome.output.content);
+                self.data_router.store_output(node_id, &outcome.output);
 
                 let event_type = if outcome.timed_out() {
                     EventType::Timeout

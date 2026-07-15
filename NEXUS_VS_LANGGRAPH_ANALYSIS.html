@@ -1,0 +1,1451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nexus vs LangGraph — 深度对比分析报告</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    primaryColor: '#ff6b6b',
+    primaryTextColor: '#c9d1d9',
+    primaryBorderColor: '#ff6b6b',
+    lineColor: '#58a6ff',
+    secondaryColor: '#4ecdc4',
+    tertiaryColor: '#a371f7',
+    background: '#161b22',
+    mainBkg: '#161b22',
+    nodeBorder: '#30363d',
+    clusterBkg: '#21262d',
+    clusterBorder: '#30363d',
+    titleColor: '#c9d1d9',
+    edgeLabelBackground: '#161b22',
+  },
+  flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' },
+  sequence: { useMaxWidth: true, wrap: true },
+  gantt: { useMaxWidth: true },
+});
+</script>
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --surface2: #21262d; --border: #30363d;
+  --text: #c9d1d9; --text2: #8b949e; --accent: #58a6ff; --accent2: #79c0ff;
+  --green: #3fb950; --green2: #238636; --red: #f85149; --orange: #d2991d;
+  --purple: #a371f7; --cyan: #39d2c0; --nexus: #ff6b6b; --langgraph: #4ecdc4;
+  --code-bg: #0d1117;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.6; font-size: 15px;
+  scroll-behavior: smooth;
+}
+
+/* NAVIGATION */
+nav {
+  position: sticky; top: 0; z-index: 1000;
+  background: rgba(13,17,23,0.94); backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border); padding: 10px 32px;
+  display: flex; gap: 20px; align-items: center; flex-wrap: wrap;
+}
+nav a { color: var(--text2); text-decoration: none; font-size: 13px; font-weight: 500; transition: color .15s; }
+nav a:hover { color: var(--accent); }
+nav .brand { color: var(--text); font-weight: 700; font-size: 15px; margin-right: auto; letter-spacing: -0.02em; }
+nav .badge { font-size: 10px; padding: 2px 10px; border-radius: 10px; font-weight: 600; }
+nav .badge-nx { background: rgba(255,107,107,0.2); color: var(--nexus); }
+nav .badge-lg { background: rgba(78,205,196,0.2); color: var(--langgraph); }
+
+/* CONTAINER */
+.container { max-width: 1300px; margin: 0 auto; padding: 40px 32px; }
+
+/* HERO */
+.hero {
+  text-align: center; padding: 72px 0 56px;
+  background: linear-gradient(180deg, rgba(88,166,255,0.04) 0%, rgba(255,107,107,0.02) 50%, transparent 100%);
+  border-bottom: 1px solid var(--border); position: relative; overflow: hidden;
+}
+.hero::before {
+  content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+  background: radial-gradient(circle at 30% 50%, rgba(255,107,107,0.04) 0%, transparent 50%),
+              radial-gradient(circle at 70% 50%, rgba(78,205,196,0.04) 0%, transparent 50%);
+  animation: heroPulse 8s ease-in-out infinite;
+}
+@keyframes heroPulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+.hero > * { position: relative; z-index: 1; }
+.hero h1 { font-size: 3rem; font-weight: 800; letter-spacing: -0.04em; margin-bottom: 12px; }
+.hero h1 .n { color: var(--nexus); } .hero h1 .vs { color: var(--text2); font-weight: 200; margin: 0 4px; } .hero h1 .lg { color: var(--langgraph); }
+.hero p { color: var(--text2); font-size: 1.05rem; max-width: 680px; margin: 0 auto; }
+.hero .meta { margin-top: 20px; color: var(--text2); font-size: 12px; display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+.hero .meta span { background: var(--surface2); padding: 3px 10px; border-radius: 12px; border: 1px solid var(--border); }
+
+/* SECTIONS */
+section { margin: 56px 0; }
+.section-title {
+  font-size: 1.6rem; font-weight: 700; margin-bottom: 6px;
+  padding-bottom: 12px; border-bottom: 2px solid var(--border);
+  display: flex; align-items: center; gap: 10px;
+}
+.section-title .num {
+  font-size: 0.9rem; color: var(--text2); font-weight: 400;
+  background: var(--surface2); padding: 2px 10px; border-radius: 12px;
+}
+.section-subtitle { color: var(--text2); margin-bottom: 28px; font-size: 0.92rem; }
+
+/* CARDS */
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 24px; margin-bottom: 20px;
+}
+.card h3 { font-size: 1.1rem; margin-bottom: 12px; color: var(--accent2); }
+.card h3 .tag { font-size: 0.75rem; padding: 2px 8px; border-radius: 8px; margin-left: 8px; vertical-align: middle; }
+.tag-nx { background: rgba(255,107,107,0.15); color: var(--nexus); border: 1px solid rgba(255,107,107,0.2); }
+.tag-lg { background: rgba(78,205,196,0.15); color: var(--langgraph); border: 1px solid rgba(78,205,196,0.2); }
+
+/* COMPARISON GRID */
+.cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+.cmp-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+.cmp-panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px;
+}
+.cmp-panel.nexus { border-top: 3px solid var(--nexus); }
+.cmp-panel.langgraph { border-top: 3px solid var(--langgraph); }
+.cmp-panel h4 { font-size: 0.95rem; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.cmp-panel.nexus h4 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--nexus); }
+.cmp-panel.langgraph h4 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--langgraph); }
+
+/* TABLES */
+table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.88rem; }
+th { text-align: left; padding: 10px 14px; background: var(--surface2); border-bottom: 2px solid var(--border); font-weight: 600; color: var(--text); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:hover td { background: rgba(88,166,255,0.03); }
+td.nx { color: var(--nexus); font-weight: 500; }
+td.lg { color: var(--langgraph); font-weight: 500; }
+
+/* CODE */
+pre {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px; overflow-x: auto;
+  font-family: 'JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace;
+  font-size: 12.5px; line-height: 1.55; margin: 10px 0; position: relative;
+}
+pre .lang-tag {
+  position: absolute; top: 6px; right: 10px; font-size: 10px;
+  color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em;
+}
+code { font-family: 'JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace; font-size: 0.9em; }
+p code, li code, td code { background: var(--surface2); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; }
+
+/* CALLOUT */
+.callout {
+  border-left: 4px solid var(--accent); padding: 14px 18px;
+  background: rgba(88,166,255,0.05); border-radius: 0 8px 8px 0; margin: 16px 0; font-size: 0.92rem;
+}
+.callout.warn { border-left-color: var(--orange); background: rgba(210,153,29,0.05); }
+.callout.good { border-left-color: var(--green); background: rgba(63,185,80,0.05); }
+.callout strong { color: var(--accent2); }
+
+/* DIAGRAM CONTAINER */
+.diagram-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 20px; margin: 20px 0;
+  overflow-x: auto;
+}
+.diagram-wrap .diagram-title {
+  font-size: 0.85rem; color: var(--text2); margin-bottom: 12px;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+}
+.mermaid { display: flex; justify-content: center; }
+.mermaid svg { max-width: 100%; }
+
+/* TABS */
+.tab-nav {
+  display: flex; gap: 0; margin-bottom: -1px; position: relative; z-index: 1;
+}
+.tab-btn {
+  padding: 10px 20px; border: 1px solid var(--border); background: var(--surface2);
+  color: var(--text2); cursor: pointer; font-size: 13px; font-weight: 500;
+  border-radius: 8px 8px 0 0; margin-right: -1px; transition: all .15s;
+}
+.tab-btn.active { background: var(--surface); color: var(--accent); border-bottom-color: var(--surface); }
+.tab-btn:hover:not(.active) { color: var(--text); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* COLLAPSIBLE */
+.collapsible {
+  border: 1px solid var(--border); border-radius: 8px; margin: 12px 0; overflow: hidden;
+}
+.collapsible-header {
+  padding: 14px 18px; background: var(--surface2); cursor: pointer;
+  display: flex; justify-content: space-between; align-items: center;
+  font-weight: 600; font-size: 0.95rem; user-select: none;
+}
+.collapsible-header:hover { background: var(--border); }
+.collapsible-header .arrow { transition: transform .25s; font-size: 12px; color: var(--text2); }
+.collapsible.open .collapsible-header .arrow { transform: rotate(90deg); }
+.collapsible-body { max-height: 0; overflow: hidden; transition: max-height .35s ease; }
+.collapsible.open .collapsible-body { max-height: 8000px; }
+.collapsible-body-inner { padding: 16px 18px; }
+
+/* TOOLTIP */
+[data-tip] {
+  border-bottom: 1px dashed var(--text2); cursor: help; position: relative;
+}
+[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  background: var(--surface2); color: var(--text); padding: 6px 12px;
+  border-radius: 6px; font-size: 12px; white-space: nowrap; z-index: 999;
+  border: 1px solid var(--border); box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  pointer-events: none;
+}
+
+/* SCORECARD */
+.score-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+.score-row .label { width: 180px; font-size: 0.85rem; flex-shrink: 0; }
+.score-bar-wrap { flex: 1; height: 10px; background: var(--surface2); border-radius: 5px; overflow: hidden; display: flex; }
+.score-bar-wrap .nx-fill { background: var(--nexus); height: 100%; transition: width .5s; }
+.score-bar-wrap .lg-fill { background: var(--langgraph); height: 100%; transition: width .5s; }
+
+/* ANIMATED FLOW */
+@keyframes flowPulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.8; }
+}
+.flow-anim { animation: flowPulse 2s ease-in-out infinite; }
+
+/* LEGEND */
+.legend { display: flex; gap: 20px; flex-wrap: wrap; margin: 10px 0; font-size: 0.82rem; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+.legend-dot.nx { background: var(--nexus); }
+.legend-dot.lg { background: var(--langgraph); }
+.legend-dot.both { background: var(--purple); }
+
+/* FEATURE FILTER */
+.filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.filter-chip {
+  padding: 6px 14px; border-radius: 16px; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--text2); cursor: pointer;
+  font-size: 12px; font-weight: 500; transition: all .15s;
+}
+.filter-chip:hover { border-color: var(--accent); color: var(--text); }
+.filter-chip.active { background: rgba(88,166,255,0.15); border-color: var(--accent); color: var(--accent); }
+
+/* VISUAL COMPARISON */
+.vis-cmp {
+  display: grid; grid-template-columns: 1fr 60px 1fr; gap: 0; align-items: start;
+  margin: 20px 0;
+}
+.vis-cmp .vis-col { padding: 16px; }
+.vis-cmp .vis-divider { text-align: center; padding-top: 40px; font-size: 2rem; color: var(--text2); }
+
+/* STEP-BY-STEP */
+.steps { counter-reset: step; }
+.step {
+  position: relative; padding-left: 48px; margin: 16px 0; counter-increment: step;
+}
+.step::before {
+  content: counter(step);
+  position: absolute; left: 0; top: 2px;
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--surface2); border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 14px; color: var(--accent);
+}
+.step h5 { font-size: 0.9rem; margin-bottom: 4px; }
+
+/* TWO COLUMN DIAGRAM */
+.diagram-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+
+/* RESPONSIVE */
+@media (max-width: 900px) {
+  .cmp-grid, .diagram-2col { grid-template-columns: 1fr; }
+  .cmp-grid.three { grid-template-columns: 1fr; }
+  .vis-cmp { grid-template-columns: 1fr; }
+  .vis-cmp .vis-divider { padding: 10px 0; }
+  .hero h1 { font-size: 2rem; }
+  .container { padding: 20px 14px; }
+  .score-row .label { width: 120px; }
+}
+
+@media print {
+  body { background: white; color: #111; font-size: 12px; }
+  .card, .cmp-panel, .diagram-wrap { border: 1px solid #ccc; background: white; break-inside: avoid; }
+  nav, .back-top, .filter-bar, .tab-nav { display: none; }
+  .mermaid svg { max-height: 300px; }
+  .collapsible-body { max-height: none !important; }
+}
+
+.back-top {
+  position: fixed; bottom: 24px; right: 24px; width: 44px; height: 44px;
+  border-radius: 50%; background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text2); cursor: pointer; font-size: 20px; display: flex;
+  align-items: center; justify-content: center; opacity: 0.6; transition: opacity .2s; z-index: 999;
+}
+.back-top:hover { opacity: 1; }
+
+/* highlight.js overrides for dark theme */
+.hljs { background: var(--code-bg) !important; color: var(--text) !important; }
+.hljs-string { color: #a5d6ff !important; }
+.hljs-keyword { color: #ff7b72 !important; }
+.hljs-comment { color: #8b949e !important; }
+.hljs-function { color: #d2a8ff !important; }
+.hljs-type { color: #ffa657 !important; }
+.hljs-number { color: #a5d6ff !important; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ NAV ═══════════════ -->
+<nav>
+  <span class="brand">Nexus <span style="color:var(--text2);font-weight:300">vs</span> LangGraph</span>
+  <a href="#overview">📋 概览</a>
+  <a href="#architecture-diagrams">🏗️ 架构图</a>
+  <a href="#features">🎯 功能</a>
+  <a href="#implementation">🔧 实现</a>
+  <a href="#execution-flow">⚡ 执行流</a>
+  <a href="#data-flow">📡 数据流</a>
+  <a href="#tradeoffs">⚖️ Tradeoffs</a>
+  <a href="#verdict">📊 结论</a>
+  <span class="badge badge-nx">Nexus</span>
+  <span class="badge badge-lg">LangGraph</span>
+</nav>
+
+<!-- ═══════════════ HERO ═══════════════ -->
+<div class="hero">
+  <h1><span class="n">Nexus</span><span class="vs">vs</span><span class="lg">LangGraph</span></h1>
+  <p>两个有向图驱动的工作流编排引擎的深度对比 —— 功能、实现、架构与工程权衡</p>
+  <div class="meta">
+    <span>📅 2026-07-15</span>
+    <span>🦀 Nexus (Rust)</span>
+    <span>🐍 LangGraph v1.0</span>
+    <span>🔬 源代码级审查</span>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- ═══════════════ 1. OVERVIEW ═══════════════ -->
+<section id="overview">
+  <div class="section-title"><span class="num">1</span> 项目概览与核心差异</div>
+  <div class="section-subtitle">先用一张图看清两个项目的本质区别</div>
+
+  <!-- 核心差异可视化图 -->
+  <div class="diagram-wrap">
+    <div class="diagram-title">📊 一图看懂：Nexus vs LangGraph 核心定位差异</div>
+    <div class="mermaid">
+graph TB
+    subgraph NEXUS["🔴 Nexus — 子进程编排引擎"]
+        direction TB
+        N1["🤖 AI (Claude Code)<br/>生成 JSON 工作流"] --> N2["📄 WorkflowDef<br/>{nodes, edges, dataflows}"]
+        N2 --> N3["🔧 Engine<br/>解析 → 验证 → 执行"]
+        N3 --> N4["📦 子进程节点<br/>任意语言/工具"]
+        N4 --> N5["📡 Dashboard<br/>WebSocket 实时监控"]
+        N6["调度=控制流<br/>h_e+g_e 正交"] -.-> N3
+        N7["数据流=数据路由<br/>显式 P2P 声明"] -.-> N3
+    end
+
+    subgraph LANGGRAPH["🟢 LangGraph — LLM Agent 框架"]
+        direction TB
+        L1["👨‍💻 开发者<br/>手写 Python/TS 代码"] --> L2["🏗️ StateGraph<br/>Builder API"]
+        L2 --> L3["⚙️ Pregel Runtime<br/>compile → super-step"]
+        L3 --> L4["⚡ 进程内函数调用<br/>Python/TS only"]
+        L4 --> L5["🔍 LangSmith<br/>可观测性平台"]
+        L6["State = 控制+数据<br/>Reducer 合并"] -.-> L3
+        L7["Checkpoint 每步保存<br/>断点续传·时间旅行"] -.-> L3
+    end
+
+    NEXUS -- "JSON 协议<br/>进程隔离" --> LANGGRAPH
+    LANGGRAPH -- "State 中心化<br/>函数式节点" --> NEXUS
+
+    style NEXUS fill:#1a1015,stroke:#ff6b6b,stroke-width:2px
+    style LANGGRAPH fill:#101a18,stroke:#4ecdc4,stroke-width:2px
+    </div>
+  </div>
+
+  <div class="cmp-grid">
+    <div class="cmp-panel nexus">
+      <h4><span class="dot"></span> Nexus</h4>
+      <table>
+        <tr><td style="color:var(--text2);width:80px">定位</td><td>有向图驱动的<strong>子进程编排引擎</strong>——AI 生成工作流、引擎确定执行</td></tr>
+        <tr><td style="color:var(--text2)">语言</td><td>Rust (edition 2024) + Python 辅助脚本</td></tr>
+        <tr><td style="color:var(--text2)">图库</td><td>petgraph::StableDiGraph</td></tr>
+        <tr><td style="color:var(--text2)">节点</td><td><strong>子进程</strong>（stdin JSON → stdout JSON 协议），任何语言</td></tr>
+        <tr><td style="color:var(--text2)">接口</td><td>CLI + Dashboard HTTP/WS + MCP JSON-RPC</td></tr>
+        <tr><td style="color:var(--text2)">核心创新</td><td>h_e + g_e 正交边模型；调度/数据流分离；Errors as Routing Paths</td></tr>
+      </table>
+    </div>
+    <div class="cmp-panel langgraph">
+      <h4><span class="dot"></span> LangGraph</h4>
+      <table>
+        <tr><td style="color:var(--text2);width:80px">定位</td><td>基于有向状态图的<strong>LLM Agent 框架</strong>——开发者手写、框架管理状态与持久化</td></tr>
+        <tr><td style="color:var(--text2)">语言</td><td>Python + TypeScript（双语言）</td></tr>
+        <tr><td style="color:var(--text2)">图模型</td><td>自研 StateGraph → CompiledStateGraph</td></tr>
+        <tr><td style="color:var(--text2)">节点</td><td><strong>进程内函数</strong>（Python/TS callable），类型安全</td></tr>
+        <tr><td style="color:var(--text2)">接口</td><td>Python/TS SDK + LangSmith + LangGraph Platform</td></tr>
+        <tr><td style="color:var(--text2)">核心创新</td><td>Pregel Super-Step；Reducer 状态合并；每步 Checkpoint；HITL interrupt()</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- 一句话总结 -->
+  <div class="callout">
+    <strong>核心差异一句话：</strong><br>
+    <span class="tag-nx" style="font-size:0.85rem">Nexus</span> = <strong>子进程级别的编排引擎</strong>——任何可执行命令即节点，stdin/stdout JSON 协议通信。面向「AI 生成工作流 → 引擎确定执行」。<br>
+    <span class="tag-lg" style="font-size:0.85rem">LangGraph</span> = <strong>函数级别的 Agent 框架</strong>——Python/TS 函数即节点，中心化 State 对象隐式传递。面向「开发者手写工作流 → 框架管理状态」。
+  </div>
+</section>
+
+<!-- ═══════════════ 2. ARCHITECTURE DIAGRAMS ═══════════════ -->
+<section id="architecture-diagrams">
+  <div class="section-title"><span class="num">2</span> 架构全景图</div>
+  <div class="section-subtitle">两张图看清两个项目的完整分层架构</div>
+
+  <div class="diagram-2col">
+    <!-- Nexus Architecture -->
+    <div class="diagram-wrap">
+      <div class="diagram-title">🔴 Nexus 分层架构</div>
+      <div class="mermaid">
+graph TB
+    subgraph L0["🌐 接口层 Interface Layer"]
+        CLI["nexus-cli run<br/>命令行工具"]
+        DASH["Dashboard<br/>Axum :48080"]
+        MCP["MCP Server<br/>JSON-RPC stdio"]
+    end
+
+    subgraph L1["⚙️ 运行时层 Runtime Layer"]
+        ENG["Engine<br/>tokio 事件循环<br/>+ Semaphore 并发控制"]
+        CANCEL["Cancel Flag<br/>AtomicBool<br/>外部取消机制"]
+    end
+
+    subgraph L2["📊 调度+数据层"]
+        SCH["Scheduler<br/>h_e + g_e 边评估<br/>RuntimeState 管理"]
+        DR["DataRouter<br/>数据存储/转发<br/>flow_index 预构建"]
+    end
+
+    subgraph L3["🔬 图层 Graph Layer"]
+        VAL["Validator<br/>10项编译前检查<br/>Tarjan SCC"]
+        BLD["Builder<br/>4阶段构建<br/>5项不变量"]
+        GD["GraphDef<br/>petgraph StableDiGraph<br/>不可变图结构"]
+    end
+
+    subgraph L4["🚀 执行层 Execution Layer"]
+        NE["NodeExecutor enum"]
+        SUB["Subprocess<br/>直接spawn"]
+        SHL["Shell<br/>cmd/sh包装"]
+        LLM["Llm<br/>Python wrapper"]
+        HTTP["Http<br/>占位"]
+    end
+
+    CLI --> ENG
+    DASH --> ENG
+    MCP --> ENG
+    ENG --> SCH
+    ENG --> DR
+    CANCEL --> ENG
+    SCH --> GD
+    DR --> GD
+    VAL --> BLD
+    BLD --> GD
+    NE --> SUB
+    NE --> SHL
+    NE --> LLM
+    NE --> HTTP
+    ENG --> NE
+
+    style L0 fill:#0d1117,stroke:#30363d
+    style L1 fill:#1a1015,stroke:#ff6b6b,stroke-width:1px
+    style L2 fill:#1a1015,stroke:#ff6b6b,stroke-width:1px
+    style L3 fill:#1a1015,stroke:#ff6b6b,stroke-width:1px
+    style L4 fill:#1a1015,stroke:#ff6b6b,stroke-width:1px
+      </div>
+    </div>
+
+    <!-- LangGraph Architecture -->
+    <div class="diagram-wrap">
+      <div class="diagram-title">🟢 LangGraph 分层架构</div>
+      <div class="mermaid">
+graph TB
+    subgraph L0["🌐 API 层"]
+        API["StateGraph Builder<br/>.add_node .add_edge<br/>.add_conditional_edges"]
+        COMPILE[".compile()<br/>拓扑排序+验证<br/>→ CompiledStateGraph"]
+    end
+
+    subgraph L1["⚙️ 执行层 Pregel Loop"]
+        PLAN["Plan<br/>确定本步执行节点"]
+        EXEC["Execute<br/>asyncio.gather<br/>并发执行"]
+        APPLY["Apply<br/>Reducer 合并更新"]
+        CKPT["Checkpoint<br/>保存状态快照"]
+    end
+
+    subgraph L2["📊 状态层 State"]
+        CH["Channels<br/>LastValue / Topic<br/>DeltaChannel"]
+        RED["Reducers<br/>default=覆盖<br/>operator.add=追加<br/>自定义=任意逻辑"]
+    end
+
+    subgraph L3["💾 持久化层"]
+        CPS["Checkpointer<br/>Postgres/SQLite<br/>Redis/MongoDB"]
+        STORE["Store<br/>跨线程长期记忆<br/>向量搜索"]
+    end
+
+    subgraph L4["🔍 可观测性"]
+        LS["LangSmith<br/>Trace/Token/Debug"]
+        STREAM["Stream<br/>values/updates<br/>messages/custom"]
+    end
+
+    API --> COMPILE
+    COMPILE --> PLAN
+    PLAN --> EXEC
+    EXEC --> APPLY
+    APPLY --> CKPT
+    CKPT --> PLAN
+    APPLY --> CH
+    CH --> RED
+    CKPT --> CPS
+    STORE --> CPS
+    EXEC --> LS
+    APPLY --> STREAM
+
+    style L0 fill:#0d1117,stroke:#30363d
+    style L1 fill:#101a18,stroke:#4ecdc4,stroke-width:1px
+    style L2 fill:#101a18,stroke:#4ecdc4,stroke-width:1px
+    style L3 fill:#101a18,stroke:#4ecdc4,stroke-width:1px
+    style L4 fill:#101a18,stroke:#4ecdc4,stroke-width:1px
+      </div>
+    </div>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot nx"></div> Nexus 专有层</div>
+    <div class="legend-item"><div class="legend-dot lg"></div> LangGraph 专有层</div>
+    <div class="legend-item"><div class="legend-dot both"></div> 两者共有概念</div>
+  </div>
+</section>
+
+<!-- ═══════════════ 3. FEATURE MATRIX ═══════════════ -->
+<section id="features">
+  <div class="section-title"><span class="num">3</span> 功能矩阵对比</div>
+  <div class="section-subtitle">按功能维度逐一对比，点击筛选器过滤关注点</div>
+
+  <div class="filter-bar">
+    <span style="color:var(--text2);font-size:12px;margin-right:8px;line-height:2">筛选：</span>
+    <span class="filter-chip active" onclick="filterFeatures('all')">全部</span>
+    <span class="filter-chip" onclick="filterFeatures('both')">两者都支持</span>
+    <span class="filter-chip" onclick="filterFeatures('nexus-only')">Nexus 优势</span>
+    <span class="filter-chip" onclick="filterFeatures('langgraph-only')">LangGraph 优势</span>
+    <span class="filter-chip" onclick="filterFeatures('core')">核心功能</span>
+    <span class="filter-chip" onclick="filterFeatures('advanced')">高级功能</span>
+  </div>
+
+  <table id="featureTable">
+    <thead>
+      <tr><th style="width:18%">功能维度</th><th style="width:10%">Nexus</th><th style="width:10%">LangGraph</th><th style="width:62%">说明</th></tr>
+    </thead>
+    <tbody>
+      <tr data-cat="both core"><td><strong>图定义</strong></td><td class="matrix-cell"><span class="tag tag-nx">JSON</span></td><td class="matrix-cell"><span class="tag tag-lg">Code API</span></td><td>Nexus 用 JSON 声明式（适合 AI 生成），LangGraph 用 Python/TS Builder API（适合开发者手写）</td></tr>
+      <tr data-cat="both core"><td><strong>DAG 执行</strong></td><td class="matrix-cell matrix-y">●</td><td class="matrix-cell matrix-y">●</td><td>两者都支持有向无环图</td></tr>
+      <tr data-cat="both core"><td><strong>循环/环路</strong></td><td class="matrix-cell matrix-y">●</td><td class="matrix-cell matrix-y">●</td><td>Nexus: h_e 无状态设计天然支持；LangGraph: 条件边回指 + Command.goto</td></tr>
+      <tr data-cat="both core"><td><strong>条件分支</strong></td><td class="matrix-cell"><span class="tag tag-nx">字符串匹配</span></td><td class="matrix-cell"><span class="tag tag-lg">函数路由</span></td><td>Nexus: exit_reason 精确字符串匹配；LangGraph: Router 函数动态决策</td></tr>
+      <tr data-cat="both core"><td><strong>并行执行</strong></td><td class="matrix-cell matrix-y">●</td><td class="matrix-cell matrix-y">●</td><td>Nexus: Semaphore 并发控制；LangGraph: Super-step 内并发</td></tr>
+      <tr data-cat="both core"><td><strong>扇入/聚合</strong></td><td class="matrix-cell"><span class="tag tag-nx">All 策略</span></td><td class="matrix-cell"><span class="tag tag-lg">Reducer</span></td><td>Nexus: fan_in_pending 计数器；LangGraph: Reducer 自动合并状态</td></tr>
+      <tr data-cat="nexus-only core"><td><strong>错误处理</strong></td><td class="matrix-cell matrix-y">●</td><td class="matrix-cell matrix-p">◐</td><td><strong>Nexus 优势：</strong>Errors as Routing Paths——Complete/Failed/Timeout 三条对称出边。LangGraph 需开发者自行 try/except</td></tr>
+      <tr data-cat="nexus-only core"><td><strong>超时/重试</strong></td><td class="matrix-cell matrix-y">● 引擎级</td><td class="matrix-cell matrix-p">◐ 函数级</td><td><strong>Nexus 优势：</strong>引擎自动管理节点超时强杀+重试。LangGraph 有 RetryPolicy 但需手动配置</td></tr>
+      <tr data-cat="nexus-only core"><td><strong>编译前验证</strong></td><td class="matrix-cell matrix-y">● 10项</td><td class="matrix-cell matrix-p">◐ 编译时</td><td><strong>Nexus 优势：</strong>10 项详细检查 + 模板占位符校验。LangGraph 编译时拓扑检查</td></tr>
+      <tr data-cat="nexus-only advanced"><td><strong>进程隔离</strong></td><td class="matrix-cell matrix-y">●</td><td class="matrix-cell matrix-n">○</td><td><strong>Nexus 独有：</strong>任何语言/工具都可作为节点——Python、Node、Go、Shell、二进制文件</td></tr>
+      <tr data-cat="nexus-only advanced"><td><strong>AI-Native 接口</strong></td><td class="matrix-cell matrix-y">●</td><td class="matrix-cell matrix-n">○</td><td><strong>Nexus 独有：</strong>JSON 格式+ MCP 协议天然适合 AI 生成工作流</td></tr>
+      <tr data-cat="nexus-only advanced"><td><strong>取消机制</strong></td><td class="matrix-cell matrix-y">●</td><td class="matrix-cell matrix-p">◐</td><td><strong>Nexus 优势：</strong>AtomicBool + Dashboard stop endpoint。LangGraph 通过 interrupt() 暂停</td></tr>
+      <tr data-cat="langgraph-only core"><td><strong>状态管理</strong></td><td class="matrix-cell"><span class="tag tag-nx">简单快照</span></td><td class="matrix-cell matrix-y">● 强类型</td><td><strong>LangGraph 优势：</strong>TypedDict + Reducer + 不可变更新。Nexus 只保留最新输出的 string content</td></tr>
+      <tr data-cat="langgraph-only core"><td><strong>流式输出</strong></td><td class="matrix-cell matrix-p">◐ stderr</td><td class="matrix-cell matrix-y">● 多模式</td><td><strong>LangGraph 优势：</strong>token级/状态级/事件级多种流式模式。Nexus 仅 stderr 行级流式</td></tr>
+      <tr data-cat="langgraph-only advanced"><td><strong>Checkpoint 持久化</strong></td><td class="matrix-cell matrix-n">○</td><td class="matrix-cell matrix-y">●</td><td><strong>LangGraph 独有：</strong>每步自动保存，断点续传，时间旅行，多后端支持</td></tr>
+      <tr data-cat="langgraph-only advanced"><td><strong>Human-in-the-Loop</strong></td><td class="matrix-cell matrix-n">○</td><td class="matrix-cell matrix-y">●</td><td><strong>LangGraph 独有：</strong>interrupt() 原语——暂停执行等待人工审批后恢复</td></tr>
+      <tr data-cat="langgraph-only advanced"><td><strong>子图组合</strong></td><td class="matrix-cell matrix-n">○</td><td class="matrix-cell matrix-y">●</td><td><strong>LangGraph 独有：</strong>Subgraph 可嵌套编译，命名空间隔离，独立 schema</td></tr>
+      <tr data-cat="langgraph-only advanced"><td><strong>长期记忆</strong></td><td class="matrix-cell matrix-n">○</td><td class="matrix-cell matrix-y">●</td><td><strong>LangGraph 独有：</strong>Store API——跨线程/跨会话的持久化记忆+向量搜索</td></tr>
+      <tr data-cat="langgraph-only advanced"><td><strong>LLM 深度集成</strong></td><td class="matrix-cell matrix-p">◐ CLI</td><td class="matrix-cell matrix-y">● 原生</td><td><strong>LangGraph 优势：</strong>ChatModel 抽象+Tool Calling+Structured Output+600+集成</td></tr>
+      <tr data-cat="langgraph-only advanced"><td><strong>多 Agent 模式</strong></td><td class="matrix-cell matrix-n">○</td><td class="matrix-cell matrix-y">●</td><td><strong>LangGraph 独有：</strong>Supervisor/Swarm/Hierarchical 预构建多Agent模板</td></tr>
+      <tr data-cat="both advanced"><td><strong>可观测性</strong></td><td class="matrix-cell"><span class="tag tag-nx">自建</span></td><td class="matrix-cell"><span class="tag tag-lg">LangSmith</span></td><td>Nexus: Dashboard+WebSocket+tracing；LangGraph: LangSmith 专业平台</td></tr>
+      <tr data-cat="nexus-only advanced"><td><strong>部署</strong></td><td class="matrix-cell matrix-y">● 单二进制</td><td class="matrix-cell matrix-p">◐ pip install</td><td><strong>Nexus 优势：</strong>Rust 编译为单二进制，拷贝即运行，无运行时依赖</td></tr>
+    </tbody>
+  </table>
+
+<script>
+function filterFeatures(cat) {
+  document.querySelectorAll('#featureTable tbody tr').forEach(row => {
+    const cats = row.dataset.cat.split(' ');
+    if (cat === 'all') { row.style.display = ''; }
+    else { row.style.display = cats.includes(cat) ? '' : 'none'; }
+  });
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  event.target.classList.add('active');
+}
+</script>
+</section>
+
+<!-- ═══════════════ 4. IMPLEMENTATION ═══════════════ -->
+<section id="implementation">
+  <div class="section-title"><span class="num">4</span> 实现对比 —— 以子功能为单元</div>
+  <div class="section-subtitle">深入每个子功能的实现细节，配图+代码+分析</div>
+
+  <!-- 4.1 图构建流程对比 -->
+  <div class="card">
+    <h3>4.1 从定义到可执行图<span class="tag tag-nx">Nexus</span><span class="tag tag-lg">LangGraph</span></h3>
+    <div class="diagram-2col">
+      <div class="diagram-wrap">
+        <div class="diagram-title">🔴 Nexus：Builder 4阶段构建 + 5项不变量</div>
+        <div class="mermaid">
+flowchart TD
+    A["📄 WorkflowDef JSON<br/>nodes[] + edges[] + dataflows[]"] --> B["1️⃣ create_nodes<br/>NodeDef → StableDiGraph<br/>建立 ID→NodeIndex 映射"]
+    B --> C["2️⃣ build_edges<br/>SchedulingEdgeDef → EdgeDef<br/>自动识别入口节点"]
+    C --> D["3️⃣ build_transfers<br/>按source聚合出边索引<br/>→ NodeTransfer (f_v)"]
+    D --> E["4️⃣ build_params<br/>提取 process_timeout_secs"]
+    E --> F{"5️⃣ from_components<br/>5项不变量检查"}
+    F -->|"✅ 通过"| G["GraphDef<br/>不可变图结构"]
+    F -->|"❌ 失败"| H["BuildInvariant Error"]
+
+    style A fill:#1a1015,stroke:#ff6b6b
+    style G fill:#1a2a1a,stroke:#3fb950
+    style H fill:#2a1a1a,stroke:#f85149
+        </div>
+      </div>
+      <div class="diagram-wrap">
+        <div class="diagram-title">🟢 LangGraph：Builder API + compile()</div>
+        <div class="mermaid">
+flowchart TD
+    A["🏗️ StateGraph Builder<br/>.add_node .add_edge<br/>.add_conditional_edges"] --> B["定义 State Schema<br/>TypedDict/Pydantic<br/>Reducer 注解"]
+    B --> C[".compile()"]
+    C --> D["拓扑排序<br/>确定 super-step 顺序"]
+    C --> E["Cycle Detection<br/>拒绝不可达环路"]
+    C --> F["边验证<br/>所有节点可达"]
+    C --> G["Channel 初始化<br/>每个 State key → Channel"]
+    D & E & F & G --> H["绑定运行时参数<br/>checkpointer breakpoints"]
+    H --> I["CompiledStateGraph<br/>不可变执行图"]
+
+    style A fill:#101a18,stroke:#4ecdc4
+    style I fill:#1a2a1a,stroke:#3fb950
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.2 边系统最详细对比 -->
+  <div class="card">
+    <h3>4.2 边系统——最核心的架构差异<span class="tag tag-nx">h_e+g_e</span><span class="tag tag-lg">Static+Conditional</span></h3>
+
+    <div class="diagram-2col">
+      <div class="diagram-wrap">
+        <div class="diagram-title">🔴 Nexus 边模型：h_e + g_e 正交分解</div>
+        <div class="mermaid">
+flowchart LR
+    subgraph EDGE["每条边 e = (from, to, h_e, g_e)"]
+        direction TB
+        HE["🔍 h_e — 分支匹配（纯函数）<br/>① 事件类型匹配<br/>  Complete / Failed / Timeout<br/>② exit_reason 字符串过滤<br/>  精确匹配 node route 输出<br/>③ threshold 计数器<br/>  事件发生N次后才触发"]
+        GE["🧩 g_e — 策略聚合<br/>Any → 立即入队下游<br/>All → fan_in_pending-1<br/>  归零后入队+重置"]
+    end
+
+    EVENT["节点事件<br/>Complete / Failed / Timeout"] --> HE
+    HE -->|"h_e 通过"| GE
+    GE -->|"入队"| DOWNSTREAM["下游节点<br/>NodeReady 事件"]
+
+    style HE fill:#1a1015,stroke:#ff6b6b
+    style GE fill:#1a1015,stroke:#ff6b6b
+        </div>
+        <div class="callout" style="font-size:0.85rem">
+          <strong>关键设计：</strong>EdgeState 只存储 event_count（阈值计数器），<strong>没有 triggered 状态</strong>。
+          每条新事件独立评估所有匹配边——环路因此不需要特殊处理就能多轮执行。
+        </div>
+      </div>
+      <div class="diagram-wrap">
+        <div class="diagram-title">🟢 LangGraph 边模型：Static + Conditional + Command</div>
+        <div class="mermaid">
+flowchart TB
+    subgraph STATIC["静态边 add_edge(A,B)"]
+        S1["A"] -->|"固定跳转"| S2["B"]
+    end
+
+    subgraph CONDITIONAL["条件边 add_conditional_edges"]
+        C1["classifier 节点"] --> C2["router(state) 函数"]
+        C2 -->|"返回 'approve'"| C3["approve_node"]
+        C2 -->|"返回 'review'"| C4["review_node"]
+        C2 -->|"返回 'reject'"| C5["reject_node"]
+    end
+
+    subgraph COMMAND["Command 动态路由"]
+        D1["节点内逻辑"] --> D2["return Command<br/>goto='target'<br/>update={...}"]
+        D2 --> D3["框架执行路由+状态更新"]
+    end
+
+    style STATIC fill:#101a18,stroke:#4ecdc4
+    style CONDITIONAL fill:#101a18,stroke:#4ecdc4
+    style COMMAND fill:#101a18,stroke:#4ecdc4
+        </div>
+      </div>
+    </div>
+
+    <!-- Interactive Tabs for Edge System -->
+    <div class="tab-nav">
+      <button class="tab-btn active" onclick="switchTab(event,'edge-nexus-detail')">Nexus 边详解</button>
+      <button class="tab-btn" onclick="switchTab(event,'edge-langgraph-detail')">LangGraph 边详解</button>
+      <button class="tab-btn" onclick="switchTab(event,'edge-compare')">并排对比</button>
+    </div>
+
+    <div id="edge-nexus-detail" class="tab-content active" style="border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;padding:20px;background:var(--surface)">
+      <div class="steps">
+        <div class="step">
+          <h5>h_e —— 分支匹配（纯函数，无记忆）</h5>
+          <p>对每条出边执行三步判定：</p>
+          <pre>// ① 事件类型匹配
+if edge.event_type != event { continue; }  // Complete≠Failed → 跳过
+
+// ② exit_reason 过滤器（可选）
+if let Some(ref expected) = edge.exit_reason {
+    if exit_reason != Some(expected) { continue; }  // "ok"≠"review" → 跳过
+}
+
+// ③ 阈值计数器
+edge_state.event_count += 1;
+if edge_state.event_count < edge.threshold { continue; }
+// threshold=3 意味着同一事件类型要发生3次才触发</pre>
+        </div>
+        <div class="step">
+          <h5>g_e —— 策略聚合</h5>
+          <pre>match edge.strategy {
+    Strategy::Any => {
+        ready_queue.push_back(edge.to);   // 立即入队下游
+    }
+    Strategy::All => {
+        fan_in_pending[edge.to] -= 1;     // 等待其他上游
+        if fan_in_pending[edge.to] == 0 { // 所有上游到齐
+            ready_queue.push_back(edge.to);
+            // 重置计数器供下一轮使用
+            fan_in_pending[edge.to] = all_edge_count;
+        }
+    }
+}</pre>
+        </div>
+      </div>
+    </div>
+
+    <div id="edge-langgraph-detail" class="tab-content" style="border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;padding:20px;background:var(--surface)">
+      <div class="steps">
+        <div class="step">
+          <h5>静态边 —— 固定跳转</h5>
+          <pre>graph.add_edge("node_a", "node_b")    # A 完成后总是跳转到 B
+graph.add_edge(START, "entry")        # 指定入口节点
+graph.add_edge("final", END)          # 到达终点</pre>
+        </div>
+        <div class="step">
+          <h5>条件边 —— Python 函数动态路由</h5>
+          <pre>def router(state: AgentState) -> str:
+    if state["confidence"] > 0.8:
+        return "auto_approve"
+    elif state["confidence"] > 0.3:
+        return "human_review"
+    return "reject"
+
+graph.add_conditional_edges(
+    "classifier", router,
+    {"auto_approve": "approve_node",
+     "human_review": "review_node",
+     "reject": "reject_node"}
+)</pre>
+        </div>
+        <div class="step">
+          <h5>Command —— 节点内动态路由（推荐）</h5>
+          <pre>def smart_node(state: State) -> Command:
+    result = analyze(state)
+    return Command(
+        update={"analysis": result},    # 状态更新
+        goto="next_step",               # 路由目标
+        graph=Command.PARENT            # 可选：跳转到父图
+    )</pre>
+        </div>
+      </div>
+    </div>
+
+    <div id="edge-compare" class="tab-content" style="border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;padding:20px;background:var(--surface)">
+      <table>
+        <tr><th>方面</th><th>Nexus h_e+g_e</th><th>LangGraph</th></tr>
+        <tr><td>路由决策方式</td><td class="nx">事件类型 + 字符串匹配 + 计数器</td><td class="lg">Python 函数 + 返回值映射</td></tr>
+        <tr><td>表达能力</td><td class="nx">中等——受限于字符串匹配和计数</td><td class="lg"><strong>极高</strong>——任意 Python 代码</td></tr>
+        <tr><td>可静态分析</td><td class="nx"><strong>高</strong>——所有路由条件在 JSON 中声明</td><td class="lg">低——Router 函数是黑盒</td></tr>
+        <tr><td>循环支持</td><td class="nx">天然——无 triggered 状态</td><td class="lg">需显式终止条件</td></tr>
+        <tr><td>AI 可生成性</td><td class="nx"><strong>高</strong>——JSON 声明清晰</td><td class="lg">中——需生成合法 Python 代码</td></tr>
+        <tr><td>并发安全</td><td class="nx">纯函数——天然安全</td><td class="lg">依赖开发者保证</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- 4.3 数据流对比 -->
+  <div class="card">
+    <h3>4.3 数据流——显式 P2P vs 中心化 State</h3>
+
+    <div class="diagram-2col">
+      <div class="diagram-wrap">
+        <div class="diagram-title">🔴 Nexus DataRouter：显式声明式数据传递</div>
+        <div class="mermaid">
+flowchart LR
+    subgraph WORKFLOW["工作流定义"]
+        direction TB
+        DF1["dataflows: [{from:'A',to:'B'},<br/>{from:'A',to:'C',alias:'input_a'},<br/>{from:'B',to:'D'}]"]
+    end
+
+    subgraph ROUTER["DataRouter 运行时"]
+        direction TB
+        FI["flow_index 预构建<br/>B → [(A,A)]<br/>C → [(input_a,A)]<br/>D → [(B,B)]"]
+        OUT["outputs 存储<br/>A → {route:'ok',content:'...'}<br/>B → {route:'done',content:'...'}"]
+    end
+
+    subgraph BUILD["build_input(D)"]
+        direction TB
+        Q1["查询 flow_index[D]"]
+        Q2["→ [(B, B_idx)]"]
+        Q3["→ outputs[B_idx]"]
+        Q4["→ {'B': 'B的输出内容'}"]
+    end
+
+    WORKFLOW --> ROUTER
+    ROUTER --> BUILD
+
+    style WORKFLOW fill:#1a1015,stroke:#ff6b6b
+    style ROUTER fill:#1a1015,stroke:#ff6b6b
+    style BUILD fill:#1a2a1a,stroke:#3fb950
+        </div>
+      </div>
+      <div class="diagram-wrap">
+        <div class="diagram-title">🟢 LangGraph State：中心化 Reducer 合并</div>
+        <div class="mermaid">
+flowchart TB
+    subgraph STATE["State Schema (TypedDict)"]
+        direction LR
+        MSG["messages<br/>Annotated[list, operator.add]<br/>→ 追加累积"]
+        STEP["current_step<br/>str<br/>→ 覆盖"]
+        SCORE["score<br/>Annotated[float, max_reducer]<br/>→ 取最大值"]
+    end
+
+    subgraph NODES["节点执行"]
+        N1["node_a(state) →<br/>{messages: [AIMessage('hi')],<br/> current_step: 'done'}"]
+        N2["node_b(state) →<br/>{messages: [ToolMessage('ok')],<br/> score: 0.95}"]
+    end
+
+    subgraph MERGE["Reducer 合并"]
+        M1["messages: [AIMsg, ToolMsg]<br/>← operator.add 追加"]
+        M2["current_step: 'done'<br/>← 覆盖（last-write-wins）"]
+        M3["score: 0.95<br/>← max(旧值, 0.95)"]
+    end
+
+    STATE --> NODES
+    NODES --> MERGE
+
+    style STATE fill:#101a18,stroke:#4ecdc4
+    style MERGE fill:#1a2a1a,stroke:#3fb950
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.4 节点执行对比 -->
+  <div class="card">
+    <h3>4.4 节点执行——进程隔离 vs 进程内函数</h3>
+    <div class="diagram-2col">
+      <div class="diagram-wrap">
+        <div class="diagram-title">🔴 Nexus：子进程 stdin/stdout JSON 协议</div>
+        <div class="mermaid">
+sequenceDiagram
+    participant E as Engine
+    participant N as NodeShell
+    participant P as 子进程
+
+    E->>N: NodeReady(node_id)
+    N->>N: 获取 Semaphore 许可
+    N->>N: 构建 NodeContext<br/>{inputs, metadata, upstream}
+    N->>N: 渲染模板变量<br/>{{datarouter.X.content}}
+    N->>P: spawn(command)
+    N->>P: stdin ← NodeContext JSON
+    N-->>P: 关闭 stdin (EOF)
+    P->>P: 读取 stdin 直到 EOF
+    P->>P: 执行业务逻辑
+    Note over P: 任何语言/工具<br/>Python/Node/Rust/Shell
+    P->>N: stdout: {"route":"ok","content":"..."}
+    P->>N: stderr: 实时日志流
+    P->>N: exit code (0=成功)
+    N->>E: NodeCompleted { outcome }
+        </div>
+      </div>
+      <div class="diagram-wrap">
+        <div class="diagram-title">🟢 LangGraph：进程内函数调用</div>
+        <div class="mermaid">
+sequenceDiagram
+    participant P as Pregel Loop
+    participant S as State
+    participant N as Node 函数
+    participant C as Checkpointer
+
+    P->>S: 加载当前 State
+    P->>N: node_fn(state, config)
+    Note over N: Python 函数<br/>同一进程内执行
+    N->>N: 读取 state["messages"]
+    N->>N: 调用 LLM / Tool
+    N-->>P: return {"messages": [...]}
+    P->>S: Reducer 合并更新
+    P->>C: save_checkpoint(state)
+    C-->>P: checkpoint_id
+    P->>P: 计算下一 super-step 节点
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.5 执行模型对比 -->
+  <div class="card">
+    <h3>4.5 执行模型——事件驱动 vs Super-Step</h3>
+    <div class="diagram-2col">
+      <div class="diagram-wrap">
+        <div class="diagram-title">🔴 Nexus：mpsc 事件驱动循环</div>
+        <div class="mermaid">
+flowchart TD
+    START["🚀 Engine::run()"] --> SEED["发送入口节点<br/>→ NodeReady 事件入队"]
+    SEED --> LOOP{"事件循环"}
+
+    LOOP -->|"recv NodeReady"| NR["handle_node_ready<br/>① acquire semaphore 许可<br/>② 构建 NodeContext<br/>③ 检查 route_policy<br/>④ spawn tokio task<br/>⑤ 设为 Running 状态"]
+    NR --> SPAWN["子进程异步执行<br/>完成后发 NodeCompleted"]
+
+    LOOP -->|"recv NodeCompleted"| NC["handle_node_completed<br/>① 解析 outcome<br/>② 超时/失败→重试?<br/>③ store_output(DataRouter)<br/>④ scheduler.handle_event<br/>   → f_v 评估出边<br/>   → 入队下游节点<br/>⑤ 发送下游 NodeReady"]
+    NC -->|"下游就绪"| LOOP
+
+    LOOP -->|"is_converged?"| DONE["✅ 收敛退出"]
+
+    SPAWN -->|"outcome"| NC
+
+    LOOP -->|"10s 无事件"| WATCH{"Watchdog"}
+    WATCH -->|"已收敛"| DONE
+    WATCH -->|"有运行中节点"| LOOP
+    WATCH -->|"3次无响应"| SKIP["标记 Pending→Skipped<br/>强制收敛"]
+
+    style START fill:#1a2a1a,stroke:#3fb950
+    style DONE fill:#1a2a1a,stroke:#3fb950
+    style SKIP fill:#2a1a1a,stroke:#f85149
+        </div>
+      </div>
+      <div class="diagram-wrap">
+        <div class="diagram-title">🟢 LangGraph：Pregel Super-Step 循环</div>
+        <div class="mermaid">
+flowchart TD
+    START["🚀 graph.invoke(input)"] --> LOAD["加载 checkpoint<br/>或初始化 State"]
+    LOAD --> PLAN["📋 Plan 阶段<br/>确定本步需执行的节点<br/>(收到新消息的节点)"]
+
+    PLAN -->|"有任务"| EXEC["⚡ Execute 阶段<br/>asyncio.gather<br/>并发执行所有节点"]
+    PLAN -->|"无任务"| DONE["✅ 执行结束"]
+
+    EXEC --> APPLY["🔄 Apply 阶段<br/>Reducer 合并所有<br/>节点输出到 State"]
+    APPLY --> SAVE["💾 Checkpoint<br/>保存 State 快照<br/>+ metadata + pending_writes"]
+    SAVE --> INCR["step += 1<br/>检查 recursion_limit"]
+    INCR -->|"未达上限"| PLAN
+    INCR -->|"达上限"| ERR["GraphRecursionError"]
+
+    EXEC -->|"节点内 interrupt()"| PAUSE["⏸️ 暂停执行<br/>等待外部 resume"]
+
+    style START fill:#1a2a1a,stroke:#3fb950
+    style DONE fill:#1a2a1a,stroke:#3fb950
+    style PAUSE fill:#2a2a1a,stroke:#d2991d
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- More collapsible implementation details -->
+  <div class="collapsible">
+    <div class="collapsible-header" onclick="this.parentElement.classList.toggle('open')">
+      📝 更多实现细节：验证系统 · LLM集成 · 错误处理 · 模板引擎
+      <span class="arrow">▶</span>
+    </div>
+    <div class="collapsible-body">
+      <div class="collapsible-body-inner">
+
+        <h4 style="color:var(--nexus);margin-top:12px">Nexus 10项编译前验证</h4>
+        <div class="mermaid">
+flowchart LR
+    V1["1.EmptyGraph"] --> V2["2.DuplicateNodeId"]
+    V2 --> V3["3.NoEntryNode"]
+    V3 --> V4["4.UnreachableNode<br/>BFS from entries"]
+    V4 --> V5["5.ExitNotReachable<br/>Reverse BFS"]
+    V5 --> V6["6.CycleWithoutEntry<br/>Tarjan SCC"]
+    V6 --> V7["7.NoValidProvider"]
+    V7 --> V8["8.InputSourceNotFound"]
+    V8 --> V9["9.InputSourceUnreachable"]
+    V9 --> V10["10.TemplateValidation<br/>metadata.* / datarouter.*.*"]
+
+    style V1 fill:#1a1015,stroke:#ff6b6b
+    style V6 fill:#1a1015,stroke:#ff6b6b,stroke-width:2px
+    style V10 fill:#1a1015,stroke:#ff6b6b,stroke-width:2px
+        </div>
+
+        <h4 style="color:var(--langgraph);margin-top:20px">LangGraph 编译时验证</h4>
+        <div class="mermaid">
+flowchart LR
+    L1["拓扑排序<br/>确定执行顺序"] --> L2["Cycle Detection<br/>拒绝不可达环路"]
+    L2 --> L3["Orphan Nodes<br/>所有节点必须可达"]
+    L3 --> L4["Schema 一致性<br/>State 字段 vs 节点返回值"]
+    L4 --> L5["Edge 一致性<br/>条件边的目标存在"]
+    L5 --> L6["Interrupt 验证<br/>中断点配置正确"]
+
+    style L2 fill:#101a18,stroke:#4ecdc4,stroke-width:2px
+        </div>
+
+        <h4 style="margin-top:20px">LLM 集成方式对比</h4>
+        <table>
+          <tr><th>方面</th><th>Nexus LlmExecutor</th><th>LangGraph ChatModel</th></tr>
+          <tr><td>集成方式</td><td class="nx">CLI 包装器——任意 CLI 工具<br/>通过 Python wrapper 委派执行</td><td class="lg">LangChain SDK 深度集成<br/>ChatModel 抽象层统一调用</td></tr>
+          <tr><td>支持的 LLM</td><td class="nx">任何有 CLI 的工具<br/>(claude, opencode, nga, codeagent...)</td><td class="lg">所有 LangChain 支持的提供商<br/>(Anthropic, OpenAI, Google, Mistral...)</td></tr>
+          <tr><td>Tool Calling</td><td class="nx">❌ 不支持（由 CLI 自行处理）</td><td class="lg">✅ 原生支持<br/>自动解析 tool_calls 和 ToolMessage</td></tr>
+          <tr><td>Structured Output</td><td class="nx">❌ 不支持</td><td class="lg">✅ with_structured_output()</td></tr>
+          <tr><td>Token 流式</td><td class="nx">❌ 不支持</td><td class="lg">✅ astream_events v2</td></tr>
+          <tr><td>版本锁定风险</td><td class="nx"><strong>低</strong>——不 link SDK</td><td class="lg">中——依赖 LangChain 版本</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ 5. EXECUTION FLOW ═══════════════ -->
+<section id="execution-flow">
+  <div class="section-title"><span class="num">5</span> 执行流程可视化</div>
+  <div class="section-subtitle">用动画流程图对比两个引擎从启动到收敛的完整生命周期</div>
+
+  <!-- Tab: 基本场景 -->
+  <div class="tab-nav">
+    <button class="tab-btn active" onclick="switchTab(event,'flow-chain')">链式 A→B→C</button>
+    <button class="tab-btn" onclick="switchTab(event,'flow-fanout')">扇出 A→B,C</button>
+    <button class="tab-btn" onclick="switchTab(event,'flow-fanin')">扇入 A,B→C</button>
+    <button class="tab-btn" onclick="switchTab(event,'flow-loop')">循环 review↔fix</button>
+  </div>
+
+  <div id="flow-chain" class="tab-content active">
+    <div class="diagram-2col">
+      <div class="diagram-wrap">
+        <div class="diagram-title">🔴 Nexus 链式执行 A→B→C</div>
+        <div class="mermaid">
+sequenceDiagram
+    participant E as Engine
+    participant A as Node A
+    participant B as Node B
+    participant C as Node C
+
+    E->>E: seed 入口节点 A
+    E->>A: NodeReady(A)
+    A->>A: spawn + stdin context
+    A-->>A: 执行中...
+    A-->>E: NodeCompleted(A)<br/>route="ok", content="a_data"
+    E->>E: store_output(A)
+    E->>E: f_v(A): A→B edge fires
+    E->>B: NodeReady(B)
+    B->>B: stdin: inputs={A: "a_data"}
+    B-->>E: NodeCompleted(B)<br/>route="done", content="b_data"
+    E->>E: store_output(B)
+    E->>E: f_v(B): B→C edge fires
+    E->>C: NodeReady(C)
+    C->>C: stdin: inputs={B: "b_data"}
+    C-->>E: NodeCompleted(C)
+    E->>E: is_converged() → true ✅
+        </div>
+      </div>
+      <div class="diagram-wrap">
+        <div class="diagram-title">🟢 LangGraph 链式执行 A→B→C</div>
+        <div class="mermaid">
+sequenceDiagram
+    participant P as Pregel
+    participant CK as Checkpointer
+    participant A as Node A
+    participant B as Node B
+    participant C as Node C
+
+    P->>CK: 初始化 State
+    P->>P: Step 0: plan → [A]
+    P->>A: A(state) → {"step1": "a_data"}
+    P->>CK: save checkpoint #1
+    P->>P: Step 1: plan → [B]
+    P->>B: B(state) → {"step2": "b_data"}
+    P->>CK: save checkpoint #2
+    P->>P: Step 2: plan → [C]
+    P->>C: C(state) → {"step3": "c_data"}
+    P->>CK: save checkpoint #3
+    P->>P: Step 3: plan → [] → END ✅
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="flow-fanout" class="tab-content">
+    <div class="diagram-2col">
+      <div class="diagram-wrap">
+        <div class="diagram-title">🔴 Nexus 扇出：A 同时触发 B 和 C</div>
+        <div class="mermaid">
+flowchart LR
+    A["A 完成<br/>route='ok'"] --> EVAL["f_v(A) 评估"]
+    EVAL -->|"Edge 0: A→B<br/>h_e: Complete匹配<br/>g_e: Any→立即入队"| B["B NodeReady"]
+    EVAL -->|"Edge 1: A→C<br/>h_e: Complete匹配<br/>g_e: Any→立即入队"| C["C NodeReady"]
+    B -->|"Semaphore 许可"| B_RUN["B 执行<br/>(与C并发)"]
+    C -->|"Semaphore 许可"| C_RUN["C 执行<br/>(与B并发)"]
+
+    style EVAL fill:#1a1015,stroke:#ff6b6b,stroke-width:2px
+        </div>
+      </div>
+      <div class="diagram-wrap">
+        <div class="diagram-title">🟢 LangGraph 扇出：同一 Super-Step 并发</div>
+        <div class="mermaid">
+flowchart LR
+    SS1["Super-Step 1<br/>A 执行"] --> SS2["Super-Step 2<br/>B 和 C 并发"]
+    SS2 --> B_RUN["B: 收到 A 的状态更新<br/>返回部分更新"]
+    SS2 --> C_RUN["C: 收到 A 的状态更新<br/>返回部分更新"]
+    B_RUN --> MERGE["Reducer 合并<br/>B和C的更新"]
+    C_RUN --> MERGE
+    MERGE --> SS3["Super-Step 3<br/>继续或结束"]
+
+    style SS2 fill:#101a18,stroke:#4ecdc4,stroke-width:2px
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="flow-fanin" class="tab-content">
+    <div class="diagram-wrap">
+      <div class="diagram-title">🔴 Nexus 扇入 All 策略：等待 A 和 B 都完成后触发 C</div>
+      <div class="mermaid">
+sequenceDiagram
+    participant E as Engine
+    participant S as Scheduler
+    participant A as Node A
+    participant B as Node B
+    participant C as Node C
+
+    E->>A: NodeReady(A)
+    E->>B: NodeReady(B)
+    Note over A,B: A 和 B 并发执行
+
+    A-->>E: NodeCompleted(A)
+    E->>S: handle_event(A, Complete)
+    S->>S: f_v(A): Edge A→C (All)
+    S->>S: fan_in_pending[C]: 2→1
+    Note over S: C 尚未就绪（fan_in_pending=1）
+
+    B-->>E: NodeCompleted(B)
+    E->>S: handle_event(B, Complete)
+    S->>S: f_v(B): Edge B→C (All)
+    S->>S: fan_in_pending[C]: 1→0 → C 入队!
+    S->>S: fan_in_pending[C] 重置为 2
+
+    E->>C: NodeReady(C)
+    C-->>E: NodeCompleted(C)
+        </div>
+    </div>
+  </div>
+
+  <div id="flow-loop" class="tab-content">
+    <div class="diagram-wrap">
+      <div class="diagram-title">🔴 Nexus 循环：review→fix 循环 + route_policy 出环</div>
+      <div class="mermaid">
+sequenceDiagram
+    participant E as Engine
+    participant R as Review
+    participant F as Fix
+
+    Note over E: review 配置 route_policy.max_runs=3
+
+    loop 第1轮
+        E->>R: NodeReady(review, run_count=1)
+        R-->>E: NodeCompleted: route="rejected"
+        E->>E: run_count=1 < 3, 不触发 route_policy
+        E->>E: route="rejected" → 匹配 fix 边
+        E->>F: NodeReady(fix)
+        F-->>E: NodeCompleted(fix)
+        E->>R: NodeReady(review, run_count=2)
+    end
+
+    loop 第2轮
+        R-->>E: NodeCompleted: route="rejected"
+        E->>E: run_count=2 < 3, 不触发
+        E->>F: NodeReady(fix)
+        F-->>E: NodeCompleted(fix)
+        E->>R: NodeReady(review, run_count=3)
+    end
+
+    loop 第3轮 (route_policy 触发!)
+        E->>E: run_count=3 >= max=3!
+        E->>E: 🔴 覆盖 route="rejected" → "approved"
+        E->>E: 跳过执行，直接合成 NodeCompleted
+        E->>E: route="approved" → 匹配 retro 边
+        Note over E: 循环终止 ✅
+    end
+        </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ 6. DATA FLOW VISUALIZATION ═══════════════ -->
+<section id="data-flow">
+  <div class="section-title"><span class="num">6</span> 数据流深度对比</div>
+  <div class="section-subtitle">两个项目最深刻的架构分歧——数据如何从上游传递到下游</div>
+
+  <div class="diagram-2col">
+    <div class="diagram-wrap">
+      <div class="diagram-title">🔴 Nexus：显式 P2P 数据流</div>
+      <div class="mermaid">
+flowchart TB
+    subgraph DECL["dataflows 声明（与 edges 独立）"]
+        D1["{from: 'A', to: 'B'}"]
+        D2["{from: 'A', to: 'C', alias: 'input_a'}"]
+        D3["{from: 'B', to: 'D'}"]
+    end
+
+    subgraph EXEC["运行时数据传递"]
+        direction TB
+        A["Node A<br/>output: {route:'ok',<br/>content:'hello world'}"]
+        B["Node B<br/>inputs: {A: 'hello world'}<br/>output: {route:'done',<br/>content:'processed'}"]
+        C["Node C<br/>inputs: {input_a: 'hello world'}<br/>(via alias)"]
+        D["Node D<br/>inputs: {B: 'processed'}"]
+    end
+
+    DECL --> EXEC
+    A -->|"key='A'"| B
+    A -->|"key='input_a' (alias)"| C
+    B -->|"key='B'"| D
+
+    style DECL fill:#1a1015,stroke:#ff6b6b
+        </div>
+      <div class="callout" style="font-size:0.85rem">
+        <strong>特点：</strong>数据流完全可审计——每一条数据传递都有显式声明。
+        支持 skip-level（A→D 跳过 B、C）、reverse-direction（数据流与调度方向相反）、
+        独立于调度拓扑（dataflow 不替代 scheduling edge）。
+      </div>
+    </div>
+    <div class="diagram-wrap">
+      <div class="diagram-title">🟢 LangGraph：中心化 State 共享</div>
+      <div class="mermaid">
+flowchart TB
+    subgraph STATE["中心 State 对象"]
+        direction LR
+        MSG["messages: list<br/>reducer: operator.add"]
+        VAL["value: str<br/>reducer: 覆盖"]
+        CNT["count: int<br/>reducer: 覆盖"]
+    end
+
+    subgraph NODES["所有节点读写同一个 State"]
+        N1["node_a(state):<br/>读取 state.messages<br/>返回 {messages: [新消息],<br/>       value: 'result_a'}"]
+        N2["node_b(state):<br/>读取 state.value<br/>返回 {count: state.count+1,<br/>       messages: [回复]}"]
+    end
+
+    STATE <--> NODES
+
+    style STATE fill:#101a18,stroke:#4ecdc4,stroke-width:2px
+        </div>
+      <div class="callout" style="font-size:0.85rem">
+        <strong>特点：</strong>编写方便——节点只需返回关心的字段。
+        Reducer 自动合并并发更新（如 operator.add 追加消息）。
+        代价是隐式耦合——无法从代码直接看出哪些节点依赖哪些字段。
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ 7. TRADEOFFS ═══════════════ -->
+<section id="tradeoffs">
+  <div class="section-title"><span class="num">7</span> Tradeoffs 深度分析</div>
+  <div class="section-subtitle">每个架构选择都是一次权衡——理解代价和收益</div>
+
+  <!-- Visual Tradeoff Scores -->
+  <div class="card">
+    <h3>7.0 能力雷达对比</h3>
+    <div class="diagram-wrap">
+      <div class="diagram-title">在 8 个关键维度上的相对优势（分数越高越强）</div>
+      <div class="score-row"><span class="label">AI 可生成性</span><div class="score-bar-wrap"><div class="nx-fill" style="width:90%"></div><div class="lg-fill" style="width:10%"></div></div></div>
+      <div class="score-row"><span class="label">跨语言能力</span><div class="score-bar-wrap"><div class="nx-fill" style="width:95%"></div><div class="lg-fill" style="width:5%"></div></div></div>
+      <div class="score-row"><span class="label">类型安全</span><div class="score-bar-wrap"><div class="nx-fill" style="width:15%"></div><div class="lg-fill" style="width:85%"></div></div></div>
+      <div class="score-row"><span class="label">持久化/容错</span><div class="score-bar-wrap"><div class="nx-fill" style="width:10%"></div><div class="lg-fill" style="width:90%"></div></div></div>
+      <div class="score-row"><span class="label">流式体验</span><div class="score-bar-wrap"><div class="nx-fill" style="width:20%"></div><div class="lg-fill" style="width:80%"></div></div></div>
+      <div class="score-row"><span class="label">部署简易度</span><div class="score-bar-wrap"><div class="nx-fill" style="width:85%"></div><div class="lg-fill" style="width:15%"></div></div></div>
+      <div class="score-row"><span class="label">LLM 深度集成</span><div class="score-bar-wrap"><div class="nx-fill" style="width:15%"></div><div class="lg-fill" style="width:85%"></div></div></div>
+      <div class="score-row"><span class="label">编译前验证</span><div class="score-bar-wrap"><div class="nx-fill" style="width:80%"></div><div class="lg-fill" style="width:20%"></div></div></div>
+      <div class="legend" style="margin-top:12px">
+        <div class="legend-item"><div class="legend-dot nx"></div> Nexus 优势</div>
+        <div class="legend-item"><div class="legend-dot lg"></div> LangGraph 优势</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>7.1 进程隔离 vs 进程内函数——性能与安全的根本取舍</h3>
+    <div class="diagram-wrap">
+      <div class="diagram-title">权衡可视化</div>
+      <div class="mermaid">
+flowchart LR
+    subgraph NX["🔴 Nexus：进程隔离"]
+        NX1["✅ 任何语言/工具"]
+        NX2["✅ 故障隔离"]
+        NX3["✅ 零 SDK 依赖"]
+        NX4["❌ ~ms spawn 开销"]
+        NX5["❌ JSON 序列化"]
+    end
+    subgraph LG["🟢 LangGraph：进程内函数"]
+        LG1["✅ ~ns 调用开销"]
+        LG2["✅ 内存共享"]
+        LG3["✅ 完整类型安全"]
+        LG4["❌ 仅 Python/TS"]
+        LG5["❌ 无故障隔离"]
+    end
+    NX --- LG
+    style NX fill:#1a1015,stroke:#ff6b6b
+    style LG fill:#101a18,stroke:#4ecdc4
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>7.2 关键 Tradeoff 总结表</h3>
+    <table>
+      <tr><th style="width:20%">设计选择</th><th style="width:40%">Nexus 偏向</th><th style="width:40%">LangGraph 偏向</th></tr>
+      <tr><td><strong>安全 vs 生态</strong></td><td class="nx">安全（Rust + 进程隔离 + no-unsafe）</td><td class="lg">生态（LangChain + 600+ 集成 + Python 社区）</td></tr>
+      <tr><td><strong>确定性 vs 灵活性</strong></td><td class="nx">确定性（JSON 声明 + 字符串匹配路由 + 引擎忠实执行拓扑）</td><td class="lg">灵活性（Python 函数路由 + 运行时动态生成图）</td></tr>
+      <tr><td><strong>AI 生成 vs 人类编写</strong></td><td class="nx">AI 生成（JSON Schema + MCP 协议 + 详尽验证）</td><td class="lg">人类编写（Builder API + IDE 补全 + 类型系统）</td></tr>
+      <tr><td><strong>解耦 vs 便利</strong></td><td class="nx">解耦（显式 dataflows + 独立调度 + 进程间 JSON 协议）</td><td class="lg">便利（隐式 State 共享 + Reducer 自动合并 + 内存对象）</td></tr>
+      <tr><td><strong>批量编排 vs 持续 Agent</strong></td><td class="nx">批量编排（分钟级 + 无持久 checkpoint + 一次性执行）</td><td class="lg">持续 Agent（小时/天级 + 每步 checkpoint + 断点续传）</td></tr>
+      <tr><td><strong>运维简单 vs 功能丰富</strong></td><td class="nx">运维简单（单二进制 + SQLite + 自建 Dashboard）</td><td class="lg">功能丰富（多数据库后端 + LangSmith + Platform）</td></tr>
+      <tr><td><strong>静态验证 vs 动态检查</strong></td><td class="nx">静态验证（10 项编译前检查 + 模板占位符校验）</td><td class="lg">混合（编译时拓扑 + 运行时 TypedDict 类型）</td></tr>
+      <tr><td><strong>跨语言 vs 深度集成</strong></td><td class="nx">跨语言（任何可执行命令 = 节点 + JSON 协议）</td><td class="lg">深度集成（LLM SDK 原生 + Tool Calling + Structured Output）</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════ 8. VERDICT ═══════════════ -->
+<section id="verdict">
+  <div class="section-title"><span class="num">8</span> 结论与场景推荐</div>
+  <div class="section-subtitle">基于全部分析的综合判断和实用建议</div>
+
+  <div class="card">
+    <h3>8.1 核心定位差异</h3>
+    <div class="diagram-wrap">
+      <div class="mermaid">
+quadrantChart
+    title 项目定位象限图
+    x-axis "低抽象（基础设施层）" --> "高抽象（应用层）"
+    y-axis "面向人类开发者" --> "面向 AI Agent"
+    quadrant-1 "AI 驱动的高级框架"
+    quadrant-2 "人类友好的高层框架"
+    quadrant-3 "人类友好的基础设施"
+    quadrant-4 "AI 驱动的基础设施"
+    "Nexus": [0.15, 0.85]
+    "LangGraph": [0.7, 0.3]
+    "Airflow": [0.05, 0.1]
+    "CrewAI": [0.85, 0.15]
+    "Prefect": [0.1, 0.15]
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>8.2 场景推荐表</h3>
+    <table>
+      <tr><th style="width:25%">场景</th><th style="width:10%">推荐</th><th style="width:65%">原因</th></tr>
+      <tr><td>🤖 AI 定义工作流、引擎执行</td><td><span class="tag tag-nx">Nexus</span></td><td>JSON 格式天然适合 AI 生成；MCP 协议标准化交互；10 项验证确保 AI 输出正确</td></tr>
+      <tr><td>🔧 多语言工具链编排</td><td><span class="tag tag-nx">Nexus</span></td><td>进程隔离——Python/Node/Rust/Shell 节点自由组合，无语言限制</td></tr>
+      <tr><td>📋 代码审查流水线</td><td><span class="tag tag-nx">Nexus</span></td><td>设计目标场景：review→fix→retro 循环；errors as routing paths；CLI LLM 直接调用</td></tr>
+      <tr><td>📦 批量数据处理 DAG</td><td><span class="tag tag-nx">Nexus</span></td><td>Semaphore 并发控制 + 节点超时 + 明确数据流声明 + 单二进制 CI 集成</td></tr>
+      <tr><td>🔥 受限环境部署</td><td><span class="tag tag-nx">Nexus</span></td><td>单二进制 Rust 编译，拷贝即运行，无 Python 环境依赖</td></tr>
+      <tr><td>⏰ 长时间运行 LLM Agent</td><td><span class="tag tag-lg">LangGraph</span></td><td>Checkpoint 每步保存 + 断点续传 + 不容易丢失进度</td></tr>
+      <tr><td>👥 多 Agent 协作系统</td><td><span class="tag tag-lg">LangGraph</span></td><td>Supervisor/Swarm 模式 + Subgraph 组合 + State 中心化通信</td></tr>
+      <tr><td>💬 持久化对话机器人</td><td><span class="tag tag-lg">LangGraph</span></td><td>Checkpoint 自动保存每轮对话 + Store 长期记忆 + HITL 人工审批</td></tr>
+      <tr><td>📡 需要 Token 级流式的 UI</td><td><span class="tag tag-lg">LangGraph</span></td><td>astream_events v2 API——逐 token 流式输出，多种模式可选</td></tr>
+      <tr><td>🔌 需要 LLM 原生 Tool Calling</td><td><span class="tag tag-lg">LangGraph</span></td><td>ChatModel 抽象层 + 自动 tool_calls 解析 + ToolNode 并行执行</td></tr>
+      <tr><td>⚡ 快速原型验证</td><td><span class="tag tag-lg">LangGraph</span></td><td>Python 交互式开发 + 丰富示例 + create_react_agent 一行搭建</td></tr>
+      <tr><td>🔒 安全敏感环境</td><td><span class="tag tag-nx">Nexus</span></td><td>Rust 编译安全（no-unsafe）+ 进程隔离 + 零供应链 SDK 风险</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3>8.3 互补架构展望</h3>
+    <div class="diagram-wrap">
+      <div class="diagram-title">Nexus + LangGraph 组合架构：外层编排 + 内层 Agent</div>
+      <div class="mermaid">
+flowchart TB
+    subgraph OUTER["🔴 Nexus 外层编排（子进程级）"]
+        N1["代码检查<br/>Shell: eslint"] --> N2["LLM 审查<br/>Llm: claude -p ..."]
+        N2 -->|"route='rejected'"| N3["自动修复<br/>Llm: opencode run"]
+        N3 --> N2
+        N2 -->|"route='approved'"| N4["部署<br/>Shell: deploy.sh"]
+    end
+
+    subgraph INNER["🟢 LangGraph 内层 Agent（在 N2 节点内）"]
+        L1["接收审查上下文"] --> L2["Research Agent<br/>搜索相关代码"]
+        L2 --> L3["Review Agent<br/>逐文件审查"]
+        L3 --> L4["Report Agent<br/>汇总审查报告"]
+        L4 --> L5["stdout JSON<br/>→ Nexus DataRouter"]
+    end
+
+    N2 -.->|"子进程调用<br/>python agent.py"| INNER
+    INNER -.->|"JSON: {route, content}"| N2
+
+    style OUTER fill:#1a1015,stroke:#ff6b6b,stroke-width:2px
+    style INNER fill:#101a18,stroke:#4ecdc4,stroke-width:2px
+      </div>
+    </div>
+    <div class="callout good">
+      <strong>这个架构的美妙之处：</strong>Nexus 负责跨语言、跨工具的<strong>外层流程</strong>（代码检查→审查→修复→部署），
+      而 LangGraph 在需要深度 LLM 能力的<strong>单个节点内</strong>发挥其 Agent 框架的全部能力（多 Agent 协作、Checkpoint 持久化、Tool Calling）。
+      两者通过 Nexus 的 stdin/stdout JSON 协议无缝通信。
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>8.4 相互学习</h3>
+    <table>
+      <tr><th style="width:25%">方向</th><th>可以学习的点</th></tr>
+      <tr><td class="nx">Nexus → 可借鉴 LangGraph</td><td>① Checkpoint 系统——支持断点续传 ② State Schema——为 DataRouter 引入可选类型约束 ③ 流式改进——支持逐行 JSON 解析 ④ Subgraph 组合——嵌套工作流复用 ⑤ HITL 原语——引擎级 interrupt/resume</td></tr>
+      <tr><td class="lg">LangGraph → 可借鉴 Nexus</td><td>① 显式数据流声明——避免隐式 State 耦合 ② 更细致的编译前验证——特别是模板引用检查 ③ Errors as Routing Paths——统一错误和正常控制流 ④ 声明式 JSON 导出——允许 AI 直接生成图 ⑤ 引擎级超时/重试——减轻节点作者负担</td></tr>
+    </table>
+  </div>
+
+</section>
+
+<!-- FOOTER -->
+<div style="text-align:center;padding:48px 0;border-top:1px solid var(--border);color:var(--text2);font-size:0.82rem">
+  <p>📊 Nexus vs LangGraph 深度对比分析报告</p>
+  <p>分析方法：源代码级审查 · 架构文档研究 · 设计哲学推导 · 工程实践判断</p>
+  <p>生成日期：2026-07-15 · 包含 20+ Mermaid 图表 · 交互式示例 · 可折叠深度分析</p>
+  <p style="margin-top:4px;font-size:0.72rem">Diagrams rendered by Mermaid.js · Dark theme optimized for technical reading</p>
+</div>
+
+</div>
+
+<button class="back-top" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Back to top">↑</button>
+
+<script>
+// Tab switching
+function switchTab(event, tabId) {
+  const tabGroup = event.target.parentElement;
+  const contentGroup = tabGroup.nextElementSibling;
+  // Deactivate all tabs in this group
+  tabGroup.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  // Hide all tab contents that are siblings
+  const allContents = tabGroup.parentElement.querySelectorAll(':scope > .tab-content');
+  allContents.forEach(c => c.classList.remove('active'));
+  // Show selected
+  const target = document.getElementById(tabId);
+  if (target) target.classList.add('active');
+}
+
+// Open first collapsible by default
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('.collapsible').forEach((c, i) => {
+    if (i === 0) c.classList.add('open');
+  });
+});
+</script>
+
+</body>
+</html>

@@ -5,7 +5,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use super::types::{exit_codes, NodeChunk, NodeContext, NodeOutcome, NodeOutput, SpawnError};
+use super::types::{exit_codes, NodeChunk, NodeContext, NodeMetadata, NodeOutcome, NodeOutput, SpawnError};
 
 /// Executes a node by spawning a subprocess.
 ///
@@ -110,8 +110,8 @@ impl SubprocessExecutor {
         (program, args)
     }
 
-    /// Render a prompt template, replacing `{{inputs.name}}` with values
-    /// from the node context's inputs map.
+    /// Render `{{metadata.*}}` and `{{datarouter.*.*}}` placeholders
+    /// in a prompt or command template.
     /// Escape a value for use in a shell command.
     /// Windows cmd: wrap in quotes, escape internal `"` → `""` and `%` → `%%`.
     /// Unix sh: wrap in single quotes, escape internal `'` → `'\''`.
@@ -126,35 +126,98 @@ impl SubprocessExecutor {
         }
     }
 
-    fn render_template(template: &str, inputs: &HashMap<String, String>) -> String {
-        Self::render_template_impl(template, inputs, false)
+    fn render_template(
+        template: &str,
+        metadata: &NodeMetadata,
+        upstream: &HashMap<String, NodeOutput>,
+    ) -> String {
+        Self::render_template_impl(template, metadata, upstream, false)
     }
 
-    fn render_template_shell(template: &str, inputs: &HashMap<String, String>) -> String {
-        Self::render_template_impl(template, inputs, true)
+    fn render_template_shell(
+        template: &str,
+        metadata: &NodeMetadata,
+        upstream: &HashMap<String, NodeOutput>,
+    ) -> String {
+        Self::render_template_impl(template, metadata, upstream, true)
     }
 
-    fn render_template_impl(template: &str, inputs: &HashMap<String, String>, shell: bool) -> String {
+    fn render_template_impl(
+        template: &str,
+        metadata: &NodeMetadata,
+        upstream: &HashMap<String, NodeOutput>,
+        shell: bool,
+    ) -> String {
         let mut result = String::with_capacity(template.len());
         let mut rest = template;
 
-        while let Some(start) = rest.find("{{inputs.") {
+        while let Some(start) = rest.find("{{") {
             result.push_str(&rest[..start]);
-            let after_start = &rest[start + 9..];
-            let end = after_start.find("}}").unwrap_or(0);
+            let after = &rest[start + 2..];
+            let end = after.find("}}").unwrap_or(0);
             if end == 0 {
                 result.push_str(&rest[start..]);
                 rest = "";
                 break;
             }
-            let key = &after_start[..end];
-            let value = inputs.get(key).map(|s| s.as_str()).unwrap_or("");
-            if shell {
-                result.push_str(&Self::shell_escape(value));
+            let key_path = &after[..end];
+            let consumed = start + 2 + end + 2;
+
+            if let Some(meta_key) = key_path.strip_prefix("metadata.") {
+                let value = match meta_key {
+                    "run_count" => metadata.run_count.to_string(),
+                    "timed_out" => metadata.timed_out.to_string(),
+                    field => {
+                        tracing::warn!(
+                            "unknown metadata field '{}' — valid: run_count, timed_out",
+                            field,
+                        );
+                        result.push_str(&rest[start..start + 4 + end]);
+                        rest = &rest[consumed..];
+                        continue;
+                    }
+                };
+                if shell {
+                    result.push_str(&Self::shell_escape(&value));
+                } else {
+                    result.push_str(&value);
+                }
+            } else if let Some(dr_path) = key_path.strip_prefix("datarouter.") {
+                if let Some(dot) = dr_path.find('.') {
+                    let alias = &dr_path[..dot];
+                    let field = &dr_path[dot + 1..];
+                    let fallback = NodeOutput { route: String::new(), content: String::new() };
+                    let output = upstream.get(alias).unwrap_or(&fallback);
+                    let value = match field {
+                        "route" => output.route.clone(),
+                        "content" => output.content.clone(),
+                        field => {
+                            tracing::warn!(
+                                "unknown datarouter field '{}' for source '{}' — valid: route, content",
+                                field, alias,
+                            );
+                            result.push_str(&rest[start..start + 4 + end]);
+                            rest = &rest[consumed..];
+                            continue;
+                        }
+                    };
+                    if shell {
+                        result.push_str(&Self::shell_escape(&value));
+                    } else {
+                        result.push_str(&value);
+                    }
+                } else {
+                    result.push_str(&rest[start..start + 4 + end]);
+                }
+            } else if key_path.contains('.') {
+                tracing::warn!(
+                    "unrecognized template '{}' — engine only supports metadata.* and datarouter.*.*",
+                    key_path,
+                );
+                result.push_str(&rest[start..start + 4 + end]);
             } else {
-                result.push_str(value);
+                result.push_str(&rest[start..start + 4 + end]);
             }
-            let consumed = start + 9 + end + 2;
             rest = &rest[consumed..];
         }
 
@@ -202,8 +265,8 @@ impl SubprocessExecutor {
 
     /// Run the subprocess, collect stdout as JSON, and return the parsed outcome.
     ///
-    /// If the command contains `{{inputs.x}}` patterns, they are replaced with
-    /// values from the node context's inputs map before spawning.
+    /// If the command contains `{{metadata.*}}` or `{{datarouter.*.*}}`
+    /// patterns, they are rendered from the node context before spawning.
     ///
     /// Any `scripts/` relative paths in the command are resolved against the
     /// executable's sibling scripts directory, so workflows can reference
@@ -226,13 +289,15 @@ impl SubprocessExecutor {
         node_id: &str,
         chunk_tx: Option<mpsc::Sender<NodeChunk>>,
     ) -> Result<NodeOutcome, SpawnError> {
-        // Render template in command string ({{inputs.x}} → ctx.inputs[x]).
-        // Shell mode: escape values to prevent command injection.
-        let command = if self.command.contains("{{inputs.") {
+        // Render template in command string: {{metadata.*}},
+        // {{datarouter.*.*}}. Shell mode: escape values to prevent command injection.
+        let has_template = self.command.contains("{{metadata.")
+            || self.command.contains("{{datarouter.");
+        let command = if has_template {
             if self.shell {
-                Self::render_template_shell(&self.command, &ctx.inputs)
+                Self::render_template_shell(&self.command, &ctx.metadata, &ctx.upstream)
             } else {
-                Self::render_template(&self.command, &ctx.inputs)
+                Self::render_template(&self.command, &ctx.metadata, &ctx.upstream)
             }
         } else {
             self.command.clone()
@@ -250,12 +315,32 @@ impl SubprocessExecutor {
             "spawning node"
         );
 
+        // Emit a chunk so the node is visible in the run log, mirroring
+        // what llm_node.py does with "[llm_node] CMD" on stderr.
+        if let Some(ref tx) = chunk_tx {
+            let label = if self.shell { "[shell_node]" } else { "[subprocess_node]" };
+            let _ = tx.try_send(NodeChunk {
+                text: format!("{} {}", label, command),
+            });
+        }
+
         let mut cmd = if self.shell {
             // Shell mode: pass the entire command directly to the shell.
             // Do NOT split — the shell handles quoting, pipes, redirects, etc.
             if cfg!(windows) {
                 let mut c = Command::new("cmd.exe");
-                c.arg("/c").arg(&command);
+                // Use raw_arg to bypass Rust's Command::arg() escaping.
+                // Rust uses backslash-escaping for embedded double quotes
+                // (producing \"), but cmd.exe doesn't understand backslash
+                // escapes. Pass the command raw — cmd.exe's echo (and most
+                // shell commands) preserve literal double-quote characters
+                // in their output without any escaping needed.
+                c.arg("/c");
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    c.raw_arg(&format!(" {}", command));
+                }
                 c
             } else {
                 let mut c = Command::new("sh");
@@ -314,13 +399,21 @@ async fn collect_and_wait(
     let out_pipe = child.stdout.take();
     let err_pipe = child.stderr.take();
 
-    // Spawn background reader for stdout.
+    // Spawn background reader for stdout — stream lines as chunks, collect full text.
     let (stdout_tx, stdout_rx) = tokio::sync::oneshot::channel::<String>();
+    let chunk_tx_out = chunk_tx.clone();
     tokio::spawn(async move {
         let mut output = String::new();
         if let Some(pipe) = out_pipe {
-            let mut reader = tokio::io::BufReader::new(pipe);
-            let _ = tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut output).await;
+            let reader = tokio::io::BufReader::new(pipe);
+            let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(ref tx) = chunk_tx_out {
+                    let _ = tx.send(NodeChunk { text: line.clone() }).await;
+                }
+                output.push_str(&line);
+                output.push('\n');
+            }
         }
         let _ = stdout_tx.send(output);
     });
@@ -526,26 +619,51 @@ mod tests {
         assert!(result.is_err(), "empty command should return SpawnError");
     }
 
-    #[tokio::test]
-    async fn test_render_template_simple() {
-        let mut inputs = HashMap::new();
-        inputs.insert("code".into(), "fn main() {}".into());
-        let result = SubprocessExecutor::render_template("echo {{inputs.code}}", &inputs);
-        assert_eq!(result, "echo fn main() {}", "simple variable should be replaced");
+    fn test_metadata() -> NodeMetadata {
+        NodeMetadata { run_count: 1, timed_out: false }
+    }
+
+    fn empty_upstream() -> HashMap<String, NodeOutput> {
+        HashMap::new()
     }
 
     #[tokio::test]
     async fn test_render_template_no_template() {
-        let inputs = HashMap::new();
-        let result = SubprocessExecutor::render_template("echo hello", &inputs);
+        let result = SubprocessExecutor::render_template(
+            "echo hello", &test_metadata(), &empty_upstream(),
+        );
         assert_eq!(result, "echo hello", "plain text should not change");
     }
 
     #[tokio::test]
-    async fn test_render_template_missing_key() {
-        let inputs = HashMap::new();
-        let result = SubprocessExecutor::render_template("echo {{inputs.missing}}", &inputs);
-        assert_eq!(result, "echo ", "missing key should be replaced with empty string");
+    async fn test_render_metadata_run_count() {
+        let meta = NodeMetadata { run_count: 5, timed_out: false };
+        let result = SubprocessExecutor::render_template(
+            "round_{{metadata.run_count}}", &meta, &empty_upstream(),
+        );
+        assert_eq!(result, "round_5");
+    }
+
+    #[tokio::test]
+    async fn test_render_datarouter_route() {
+        let meta = test_metadata();
+        let mut upstream = HashMap::new();
+        upstream.insert("up".into(), NodeOutput { route: "complete".into(), content: "data".into() });
+        let result = SubprocessExecutor::render_template(
+            "{{datarouter.up.route}}", &meta, &upstream,
+        );
+        assert_eq!(result, "complete");
+    }
+
+    #[tokio::test]
+    async fn test_render_datarouter_content() {
+        let meta = test_metadata();
+        let mut upstream = HashMap::new();
+        upstream.insert("up".into(), NodeOutput { route: "ok".into(), content: "hello world".into() });
+        let result = SubprocessExecutor::render_template(
+            "{{datarouter.up.content}}", &meta, &upstream,
+        );
+        assert_eq!(result, "hello world");
     }
 
     #[test]

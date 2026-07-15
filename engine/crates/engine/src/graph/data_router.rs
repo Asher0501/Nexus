@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use petgraph::graph::NodeIndex;
 use tracing;
 
+use crate::nodeshell::NodeOutput;
+
 /// Routes output data from upstream nodes to downstream consumers.
 ///
 /// Driven by the workflow's `dataflows[]` declarations — not by per-node
@@ -17,8 +19,8 @@ use tracing;
 /// sources declared in the data flow topology.
 #[derive(Debug, Clone)]
 pub struct DataRouter {
-    /// Maps each node index to its stored output string.
-    outputs: HashMap<NodeIndex, String>,
+    /// Maps each node index to its stored output (route + content).
+    outputs: HashMap<NodeIndex, NodeOutput>,
     /// Pre-built index: target node → [(alias, source_node_index)]
     flow_index: HashMap<NodeIndex, Vec<(String, NodeIndex)>>,
     /// Reverse mapping: NodeIndex → string node ID (for diagnostics).
@@ -57,11 +59,11 @@ impl DataRouter {
         }
     }
 
-    /// Store the output string produced by the given node.
+    /// Store the output produced by the given node.
     ///
     /// If the node already has stored output, it is overwritten.
-    pub fn store_output(&mut self, node_index: NodeIndex, output: &str) {
-        self.outputs.insert(node_index, output.to_string());
+    pub fn store_output(&mut self, node_index: NodeIndex, output: &NodeOutput) {
+        self.outputs.insert(node_index, output.clone());
     }
 
     /// Remove the stored output for a node, typically called before retrying it
@@ -73,7 +75,7 @@ impl DataRouter {
     /// Build an input map for a target node by looking up its registered
     /// data flows.
     ///
-    /// Returns a map of alias → output string for each source declared in
+    /// Returns a map of alias → content string for each source declared in
     /// the workflow's `dataflows[]`. Sources with no stored output yet
     /// yield an empty string.
     #[must_use]
@@ -82,8 +84,8 @@ impl DataRouter {
         if let Some(flows) = self.flow_index.get(&target) {
             for (alias, source) in flows {
                 match self.outputs.get(source) {
-                    Some(output) if !output.is_empty() => {
-                        result.insert(alias.clone(), output.clone());
+                    Some(output) if !output.content.is_empty() => {
+                        result.insert(alias.clone(), output.content.clone());
                     }
                     _ => {
                         let source_id = self
@@ -103,12 +105,45 @@ impl DataRouter {
         }
         result
     }
+
+    /// Build an upstream output map for the target node.
+    ///
+    /// Returns a map of alias → full NodeOutput (route + content).
+    /// Used by the template engine to resolve `{{datarouter.<alias>.route}}`
+    /// and `{{datarouter.<alias>.content}}` references.
+    /// Sources with no stored output yield `{route: "", content: ""}`.
+    #[must_use]
+    pub fn build_upstream(&self, target: NodeIndex) -> HashMap<String, NodeOutput> {
+        let mut result = HashMap::new();
+        if let Some(flows) = self.flow_index.get(&target) {
+            for (alias, source) in flows {
+                let output = self
+                    .outputs
+                    .get(source)
+                    .cloned()
+                    .unwrap_or_else(|| NodeOutput {
+                        route: String::new(),
+                        content: String::new(),
+                    });
+                result.insert(alias.clone(), output);
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::predecessor::DataFlowDef;
+
+    fn no(content: &str) -> NodeOutput {
+        NodeOutput { route: "ok".into(), content: content.into() }
+    }
+
+    fn no_route(route: &str, content: &str) -> NodeOutput {
+        NodeOutput { route: route.into(), content: content.into() }
+    }
 
     fn make_router(dataflows: Vec<DataFlowDef>) -> DataRouter {
         let mut id_to_idx = HashMap::new();
@@ -137,8 +172,8 @@ mod tests {
     #[test]
     fn test_store_and_retrieve() {
         let mut router = make_router(vec![df("A", "C"), df("B", "C")]);
-        router.store_output(NodeIndex::new(0), "output_from_A");
-        router.store_output(NodeIndex::new(1), "output_from_B");
+        router.store_output(NodeIndex::new(0), &no("output_from_A"));
+        router.store_output(NodeIndex::new(1), &no("output_from_B"));
 
         let inputs = router.build_input(NodeIndex::new(2)); // C's inputs
         assert_eq!(inputs.len(), 2);
@@ -149,8 +184,8 @@ mod tests {
     #[test]
     fn test_overwrite_output() {
         let mut router = make_router(vec![df("A", "B")]);
-        router.store_output(NodeIndex::new(0), "first");
-        router.store_output(NodeIndex::new(0), "second");
+        router.store_output(NodeIndex::new(0), &no("first"));
+        router.store_output(NodeIndex::new(0), &no("second"));
 
         let inputs = router.build_input(NodeIndex::new(1));
         assert_eq!(inputs.get("A"), Some(&"second".into()));
@@ -159,7 +194,7 @@ mod tests {
     #[test]
     fn test_missing_output_returns_empty() {
         let mut router = make_router(vec![df("A", "B")]);
-        router.store_output(NodeIndex::new(1), "B_data");
+        router.store_output(NodeIndex::new(1), &no("B_data"));
         // A has no stored output → should return empty string
         let inputs = router.build_input(NodeIndex::new(1));
         assert_eq!(inputs.get("A"), Some(&String::new()));
@@ -175,7 +210,7 @@ mod tests {
     #[test]
     fn test_clear_output_removes_stored_data() {
         let mut router = make_router(vec![df("A", "B")]);
-        router.store_output(NodeIndex::new(0), "stale");
+        router.store_output(NodeIndex::new(0), &no("stale"));
         router.clear_output(NodeIndex::new(0));
 
         // After clear, build_input should yield empty string (as if never stored).
@@ -193,10 +228,30 @@ mod tests {
     #[test]
     fn test_alias_maps_to_correct_key() {
         let mut router = make_router(vec![df_with_alias("A", "C", "input_a")]);
-        router.store_output(NodeIndex::new(0), "val");
+        router.store_output(NodeIndex::new(0), &no("val"));
 
         let inputs = router.build_input(NodeIndex::new(2));
         assert_eq!(inputs.get("input_a"), Some(&"val".into()));
         assert!(inputs.get("A").is_none(), "alias should replace raw node ID");
+    }
+
+    #[test]
+    fn test_build_upstream() {
+        let mut router = make_router(vec![df("A", "C"), df("B", "C")]);
+        router.store_output(NodeIndex::new(0), &no_route("complete", "data_a"));
+        router.store_output(NodeIndex::new(1), &no_route("fixed", "data_b"));
+
+        let upstream = router.build_upstream(NodeIndex::new(2));
+        assert_eq!(upstream.get("A").map(|o| o.route.as_str()), Some("complete"));
+        assert_eq!(upstream.get("A").map(|o| o.content.as_str()), Some("data_a"));
+        assert_eq!(upstream.get("B").map(|o| o.route.as_str()), Some("fixed"));
+    }
+
+    #[test]
+    fn test_build_upstream_missing_returns_empty() {
+        let router = make_router(vec![df("A", "C")]);
+        let upstream = router.build_upstream(NodeIndex::new(2));
+        assert_eq!(upstream.get("A").map(|o| o.route.as_str()), Some(""));
+        assert_eq!(upstream.get("A").map(|o| o.content.as_str()), Some(""));
     }
 }

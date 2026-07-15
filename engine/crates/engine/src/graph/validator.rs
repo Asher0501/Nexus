@@ -178,7 +178,11 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
         }
     }
 
-    // 10. ReferencedInputWithoutDataflow — node uses {{inputs.X}} but no dataflow X→this_node
+    let valid_metadata_fields: &[&str] = &["run_count", "timed_out"];
+    let valid_dr_fields: &[&str] = &["route", "content"];
+
+    // 10. Validate template placeholders: {{metadata.<field>}},
+    //     {{datarouter.<src>.<field>}}, and unrecognized {{prefix.key}}.
     {
         for node in &def.nodes {
             // Collect text to scan: prompt + command from all providers
@@ -196,31 +200,82 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
                     _ => {}
                 }
             }
-            // Extract {{inputs.X}} references
-            let mut referenced: HashSet<String> = HashSet::new();
-            let mut rest = text.as_str();
-            while let Some(start) = rest.find("{{inputs.") {
-                let after = &rest[start + 10..];
-                if let Some(end) = after.find("}}") {
-                    referenced.insert(after[..end].to_string());
-                    rest = &after[end + 2..];
-                } else {
-                    rest = after;
-                }
-            }
-            // Check each reference
+
             let incoming: HashSet<&str> = def
                 .dataflows
                 .iter()
                 .filter(|df| df.to == node.id)
                 .map(|df| df.from.as_str())
                 .collect();
-            for src in &referenced {
-                if !incoming.contains(src.as_str()) && all_node_ids.contains(src.as_str()) {
-                    errors.push(ValidationError::ReferencedInputWithoutDataflow {
-                        node_id: node.id.clone(),
-                        source_id: src.clone(),
-                    });
+
+            // 10a. {{metadata.<field>}} — field must be run_count or timed_out.
+            let mut rest = text.as_str();
+            while let Some(start) = rest.find("{{metadata.") {
+                let after = &rest[start + 11..];
+                if let Some(end) = after.find("}}") {
+                    let field = &after[..end];
+                    if !valid_metadata_fields.contains(&field) {
+                        errors.push(ValidationError::UnknownMetadataField {
+                            node_id: node.id.clone(),
+                            field: field.to_string(),
+                        });
+                    }
+                    rest = &after[end + 2..];
+                } else {
+                    rest = after;
+                }
+            }
+
+            // 10b. {{datarouter.<src>.<field>}} — source must have a
+            //     dataflow, field must be "route" or "content".
+            rest = text.as_str();
+            while let Some(start) = rest.find("{{datarouter.") {
+                let after = &rest[start + 13..];
+                if let Some(end) = after.find("}}") {
+                    let path = &after[..end];
+                    if let Some(dot) = path.find('.') {
+                        let src = &path[..dot];
+                        let field = &path[dot + 1..];
+                        if !valid_dr_fields.contains(&field) {
+                            errors.push(ValidationError::UnknownDatarouterField {
+                                node_id: node.id.clone(),
+                                source_id: src.to_string(),
+                                field: field.to_string(),
+                            });
+                        }
+                        if !incoming.contains(src) && all_node_ids.contains(src) {
+                            errors.push(ValidationError::DatarouterRefWithoutDataflow {
+                                node_id: node.id.clone(),
+                                source_id: src.to_string(),
+                            });
+                        }
+                    }
+                    rest = &after[end + 2..];
+                } else {
+                    rest = after;
+                }
+            }
+
+            // 10c. Unrecognized {{prefix.key...}} — structured templates
+            //     (contain '.') that don't match metadata/datarouter.
+            rest = text.as_str();
+            while let Some(start) = rest.find("{{") {
+                let after = &rest[start + 2..];
+                if let Some(end) = after.find("}}") {
+                    let content = &after[..end];
+                    if content.contains('.') {
+                        let known = content.starts_with("metadata.")
+                            || content.starts_with("datarouter.");
+                        if !known {
+                            errors.push(ValidationError::UnrecognizedTemplate {
+                                node_id: node.id.clone(),
+                                template: content.to_string(),
+                            });
+                        }
+                    }
+                    rest = &after[end + 2..];
+                } else {
+                    rest = after;
                 }
             }
         }

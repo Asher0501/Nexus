@@ -14,13 +14,18 @@ pub struct NodeMetadata {
 /// Input context passed to a node from the engine.
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeContext {
-    /// Map of upstream node IDs to their output strings.
+    /// Map of upstream node IDs to their output content strings
+    /// (legacy: retained for non-template use; template rendering uses `upstream`).
     pub inputs: HashMap<String, String>,
     /// Extension parameters for the node (unused in v1, reserved).
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub extensions: HashMap<String, String>,
     /// Execution metadata.
     pub metadata: NodeMetadata,
+    /// Map of upstream alias → full output (route + content),
+    /// for `{{datarouter.<alias>.route}}` and `{{datarouter.<alias>.content}}`.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub upstream: HashMap<String, NodeOutput>,
 }
 
 impl Default for NodeContext {
@@ -32,6 +37,7 @@ impl Default for NodeContext {
                 run_count: 1,
                 timed_out: false,
             },
+            upstream: HashMap::new(),
         }
     }
 }

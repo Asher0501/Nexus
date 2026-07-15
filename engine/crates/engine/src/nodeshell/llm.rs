@@ -1,7 +1,7 @@
 //! Generic LLM executor — delegates to `llm_node.py` for cross-platform
 //! CLI resolution, subprocess management, and output parsing.
 //!
-//! The Rust side only renders `{{inputs.x}}` / `{{prompt}}` templates,
+//! The Rust side renders `{{metadata.*}}` / `{{datarouter.*.*}}` templates,
 //! pipes a [`NodeContext`] to the Python script via stdin, and reads the
 //! [`NodeOutput`] from stdout.  stderr is streamed to the engine log.
 
@@ -21,7 +21,7 @@ use super::types::{exit_codes, NodeChunk, NodeContext, NodeOutcome, NodeOutput, 
 pub struct LlmExecutor {
     /// Command template with `{{prompt}}` placeholder.
     command_template: String,
-    /// Prompt template with `{{inputs.x}}` placeholders.
+    /// Prompt template with `{{metadata.*}}` / `{{datarouter.*.*}}` placeholders.
     prompt_template: Option<String>,
     /// Expected route values.
     routes: Vec<String>,
@@ -89,22 +89,78 @@ impl LlmExecutor {
         }
     }
 
-    /// Render `{{inputs.key}}` placeholders.
-    fn render_inputs(template: &str, inputs: &HashMap<String, String>) -> String {
+    /// Render `{{metadata.field}}` and `{{datarouter.alias.field}}`
+    /// placeholders in a prompt template.
+    ///
+    /// Supported patterns:
+    /// - `{{metadata.run_count}}` — current execution count (1-based)
+    /// - `{{metadata.timed_out}}` — "true" if previous run timed out
+    /// - `{{datarouter.<alias>.route}}` — upstream node's route value
+    /// - `{{datarouter.<alias>.content}}` — upstream node's content
+    fn render_inputs(
+        template: &str,
+        metadata: &super::types::NodeMetadata,
+        upstream: &HashMap<String, super::types::NodeOutput>,
+    ) -> String {
         let mut result = String::with_capacity(template.len());
         let mut rest = template;
-        while let Some(start) = rest.find("{{inputs.") {
+        while let Some(start) = rest.find("{{") {
             result.push_str(&rest[..start]);
-            let after = &rest[start + 9..];
+            let after = &rest[start + 2..];
             let end = after.find("}}").unwrap_or(0);
             if end == 0 {
                 result.push_str(&rest[start..]);
                 rest = "";
                 break;
             }
-            let key = &after[..end];
-            result.push_str(inputs.get(key).map(|s| s.as_str()).unwrap_or(""));
-            rest = &after[end + 2..];
+            let key_path = &after[..end];
+
+            if let Some(meta_key) = key_path.strip_prefix("metadata.") {
+                match meta_key {
+                    "run_count" => result.push_str(&metadata.run_count.to_string()),
+                    "timed_out" => result.push_str(&metadata.timed_out.to_string()),
+                    field => {
+                        tracing::warn!(
+                            "unknown metadata field '{}' — valid: run_count, timed_out",
+                            field,
+                        );
+                        result.push_str(&rest[start..start + 4 + end]);
+                    }
+                }
+            } else if let Some(dr_path) = key_path.strip_prefix("datarouter.") {
+                if let Some(dot) = dr_path.find('.') {
+                    let alias = &dr_path[..dot];
+                    let field = &dr_path[dot + 1..];
+                    let fallback = super::types::NodeOutput { route: String::new(), content: String::new() };
+                    let output = upstream.get(alias).unwrap_or(&fallback);
+                    match field {
+                        "route" => result.push_str(&output.route),
+                        "content" => result.push_str(&output.content),
+                        field => {
+                            tracing::warn!(
+                                "unknown datarouter field '{}' for source '{}' — valid: route, content",
+                                field, alias,
+                            );
+                            result.push_str(&rest[start..start + 4 + end]);
+                        }
+                    }
+                } else {
+                    // Malformed datarouter path (no dot after alias) — pass through
+                    result.push_str(&rest[start..start + 4 + end]);
+                }
+            } else if key_path.contains('.') {
+                // Structured {{prefix.key}} not matching metadata or datarouter
+                tracing::warn!(
+                    "unrecognized template '{}' — engine only supports metadata.* and datarouter.*.*",
+                    key_path,
+                );
+                result.push_str(&rest[start..start + 4 + end]);
+            } else {
+                // Plain {{x}} without dot — pass through unchanged (likely LLM prompt example)
+                result.push_str(&rest[start..start + 4 + end]);
+            }
+            let consumed = start + 2 + end + 2;
+            rest = &rest[consumed..];
         }
         result.push_str(rest);
         result
@@ -116,7 +172,7 @@ impl LlmExecutor {
 
         // Render prompt template and store in extensions
         let prompt = if let Some(ref tmpl) = self.prompt_template {
-            Self::render_inputs(tmpl, &ctx.inputs)
+            Self::render_inputs(tmpl, &ctx.metadata, &ctx.upstream)
         } else if !ctx.inputs.is_empty() {
             ctx.inputs
                 .iter()
@@ -137,6 +193,7 @@ impl LlmExecutor {
             inputs: ctx.inputs.clone(),
             extensions,
             metadata: ctx.metadata.clone(),
+            upstream: ctx.upstream.clone(),
         }
     }
 
@@ -308,17 +365,58 @@ mod tests {
 
     #[test]
     fn test_render_inputs() {
-        let mut inputs = HashMap::new();
-        inputs.insert("code".into(), "fn main() {}".into());
-        let result = LlmExecutor::render_inputs("Review: {{inputs.code}}", &inputs);
-        assert_eq!(result, "Review: fn main() {}");
+        let metadata = super::super::types::NodeMetadata { run_count: 1, timed_out: false };
+        let upstream = HashMap::new();
+        let result = LlmExecutor::render_inputs(
+            "No templates here", &metadata, &upstream,
+        );
+        assert_eq!(result, "No templates here");
     }
 
     #[test]
-    fn test_render_inputs_no_match() {
-        let inputs = HashMap::new();
-        let result = LlmExecutor::render_inputs("No templates here", &inputs);
-        assert_eq!(result, "No templates here");
+    fn test_render_metadata_run_count() {
+        let metadata = super::super::types::NodeMetadata { run_count: 3, timed_out: false };
+        let upstream = HashMap::new();
+        let result = LlmExecutor::render_inputs(
+            "Round {{metadata.run_count}}", &metadata, &upstream,
+        );
+        assert_eq!(result, "Round 3");
+    }
+
+    #[test]
+    fn test_render_metadata_timed_out() {
+        let metadata = super::super::types::NodeMetadata { run_count: 1, timed_out: true };
+        let upstream = HashMap::new();
+        let result = LlmExecutor::render_inputs(
+            "timed_out={{metadata.timed_out}}", &metadata, &upstream,
+        );
+        assert_eq!(result, "timed_out=true");
+    }
+
+    #[test]
+    fn test_render_datarouter_route() {
+        let metadata = super::super::types::NodeMetadata { run_count: 1, timed_out: false };
+        let mut upstream = HashMap::new();
+        upstream.insert("merge".into(), super::super::types::NodeOutput {
+            route: "dispatch".into(), content: "summary text".into(),
+        });
+        let result = LlmExecutor::render_inputs(
+            "Route was {{datarouter.merge.route}}", &metadata, &upstream,
+        );
+        assert_eq!(result, "Route was dispatch");
+    }
+
+    #[test]
+    fn test_render_datarouter_content() {
+        let metadata = super::super::types::NodeMetadata { run_count: 1, timed_out: false };
+        let mut upstream = HashMap::new();
+        upstream.insert("merge".into(), super::super::types::NodeOutput {
+            route: "dispatch".into(), content: "summary text".into(),
+        });
+        let result = LlmExecutor::render_inputs(
+            "Content: {{datarouter.merge.content}}", &metadata, &upstream,
+        );
+        assert_eq!(result, "Content: summary text");
     }
 
     #[test]
@@ -344,14 +442,19 @@ mod tests {
     fn test_build_context_adds_prompt_and_routes() {
         let mut inputs = HashMap::new();
         inputs.insert("seed".into(), "hello".into());
+        let mut upstream = HashMap::new();
+        upstream.insert("seed".into(), super::super::types::NodeOutput {
+            route: "ok".into(), content: "hello".into(),
+        });
         let ctx = NodeContext {
             inputs,
             extensions: HashMap::new(),
             metadata: super::super::types::NodeMetadata { run_count: 1, timed_out: false },
+            upstream,
         };
         let exe = LlmExecutor::new(
             "claude -p \"{{prompt}}\"",
-            Some("Review: {{inputs.seed}}".into()),
+            Some("Review: {{datarouter.seed.content}}".into()),
             vec!["ok".into(), "err".into()],
             None,
         );

@@ -10,7 +10,7 @@
       "providers": [{
         "type": "llm",
         "command": "claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions",
-        "prompt": "Round {{metadata.run_count}}/2.\n\nSTEP 1: Read ../bak/design/ARCHITECTURE.md.\nSTEP 2: Critique it for abstraction consistency, design rationale, logical gaps.\nSTEP 3: Write your review to review.md.\nSTEP 4: Output EXACTLY this JSON and NOTHING ELSE on the LAST line:\n{\"route\":\"again\",\"content\":\"see review.md\"}\n\nIf this is round 2 and document is acceptable, output route='stop' instead of 'again'.\nLast fix (if any): {{inputs.fix}}",
+        "prompt": "Round {{metadata.run_count}}/2.\n\nSTEP 1: Read ../bak/design/ARCHITECTURE.md.\nSTEP 2: Critique it for abstraction consistency, design rationale, logical gaps.\nSTEP 3: Write your review to review.md.\nSTEP 4: Output EXACTLY this JSON and NOTHING ELSE on the LAST line:\n{\"route\":\"again\",\"content\":\"see review.md\"}\n\nIf this is round 2 and document is acceptable, output route='stop' instead of 'again'.\nLast fix (if any): {{datarouter.fix.content}}",
         "routes": ["again", "stop"]
       }],
       "process_timeout_secs": 300,
@@ -21,7 +21,7 @@
       "providers": [{
         "type": "llm",
         "command": "claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions",
-        "prompt": "STEP 1: Read ../bak/design/ARCHITECTURE.md.\nSTEP 2: Based on this review, rewrite problematic sections.\nSTEP 3: Write fixes to fix.md.\nSTEP 4: Output EXACTLY this JSON:\n{\"route\":\"done\",\"content\":\"see fix.md\"}\n\nReview:\n{{inputs.review}}",
+        "prompt": "STEP 1: Read ../bak/design/ARCHITECTURE.md.\nSTEP 2: Based on this review, rewrite problematic sections.\nSTEP 3: Write fixes to fix.md.\nSTEP 4: Output EXACTLY this JSON:\n{\"route\":\"done\",\"content\":\"see fix.md\"}\n\nReview:\n{{datarouter.review.content}}",
         "routes": ["done"]
       }],
       "process_timeout_secs": 300

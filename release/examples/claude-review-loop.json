@@ -16,7 +16,7 @@
         {
           "type": "llm",
           "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-          "prompt": "You are a code reviewer. Review the code and respond with JSON: {\"route\":\"approved\"|\"rejected\",\"content\":\"your review\"}. Route 'approved' if the code meets all quality standards. Route 'rejected' if there are bugs, missing edge cases, or style issues. Always find at least one improvement.\n\nCode to review: {{inputs.start}}",
+          "prompt": "You are a code reviewer. Review the code and respond with JSON: {\"route\":\"approved\"|\"rejected\",\"content\":\"your review\"}. Route 'approved' if the code meets all quality standards. Route 'rejected' if there are bugs, missing edge cases, or style issues. Always find at least one improvement.\n\nCode to review: {{datarouter.start.content}}",
           "routes": ["approved", "rejected"]
         }
       ],
@@ -29,7 +29,7 @@
         {
           "type": "llm",
           "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-          "prompt": "You are a code fixer. Given the review feedback, fix the code and output the corrected version as JSON: {\"route\":\"fixed\",\"content\":\"the fixed code\"}.\n\nReview feedback: {{inputs.review}}",
+          "prompt": "You are a code fixer. Given the review feedback, fix the code and output the corrected version as JSON: {\"route\":\"fixed\",\"content\":\"the fixed code\"}.\n\nReview feedback: {{datarouter.review.content}}",
           "routes": ["fixed"]
         }
       ],

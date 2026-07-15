@@ -10,7 +10,7 @@
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are an architecture reviewer (Round {{metadata.run_count}}/2). Critique the Nexus architecture document. Write your review to review.md (append mode, use Bash: cat >> review.md << 'EOF' ... EOF).\n\nDocument:\n{{inputs.start}}\n\nPrevious fix:\n{{inputs.fix}}\n\nIf issues found output route='needs_fix'. If architecture is sound after round 2 output route='done'.\nOutput ONLY: {\"route\":\"needs_fix|done\",\"content\":\"## Review Round {{metadata.run_count}}\n...\"}",
+        "prompt": "You are an architecture reviewer (Round {{metadata.run_count}}/2). Critique the Nexus architecture document. Write your review to review.md (append mode, use Bash: cat >> review.md << 'EOF' ... EOF).\n\nDocument:\n{{datarouter.start.content}}\n\nPrevious fix:\n{{datarouter.fix.content}}\n\nIf issues found output route='needs_fix'. If architecture is sound after round 2 output route='done'.\nOutput ONLY: {\"route\":\"needs_fix|done\",\"content\":\"## Review Round {{metadata.run_count}}\n...\"}",
         "routes": ["needs_fix", "done"]
       }],
       "process_timeout_secs": 300,
@@ -21,7 +21,7 @@
       "providers": [{
         "type": "llm",
         "command": "claude -p \"{{prompt}}\" --output-format json --verbose",
-        "prompt": "You are an architecture editor. Based on review, propose concrete improvements. Write your fixes to fix.md (append mode, use Bash: cat >> fix.md << 'EOF' ... EOF).\n\nReview:\n{{inputs.review}}\n\nOriginal document:\n{{inputs.start}}\n\nOutput ONLY: {\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\n...\"}",
+        "prompt": "You are an architecture editor. Based on review, propose concrete improvements. Write your fixes to fix.md (append mode, use Bash: cat >> fix.md << 'EOF' ... EOF).\n\nReview:\n{{datarouter.review.content}}\n\nOriginal document:\n{{datarouter.start.content}}\n\nOutput ONLY: {\"route\":\"fixed\",\"content\":\"## Fix Round {{metadata.run_count}}\n...\"}",
         "routes": ["fixed"]
       }],
       "process_timeout_secs": 300

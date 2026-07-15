@@ -62,13 +62,40 @@ pub enum ValidationError {
         source_id: String,
     },
 
-    /// A node references `{{inputs.X}}` in its prompt or command but no
-    /// dataflow `from: X, to: this_node` exists.
-    ReferencedInputWithoutDataflow {
-        /// The node that references the input.
+    /// A node references `{{datarouter.X.*}}` but no dataflow
+    /// `from: X, to: this_node` exists.
+    DatarouterRefWithoutDataflow {
+        /// The node that references the datarouter field.
         node_id: String,
-        /// The referenced input source node ID.
+        /// The referenced source node ID.
         source_id: String,
+    },
+
+    /// A node uses `{{metadata.<FIELD>}}` with an unrecognized field name.
+    UnknownMetadataField {
+        /// The node that uses the unknown metadata field.
+        node_id: String,
+        /// The unrecognized field name.
+        field: String,
+    },
+
+    /// A node uses `{{datarouter.<SRC>.<FIELD>}}` with an unrecognized field.
+    UnknownDatarouterField {
+        /// The node that uses the unknown field.
+        node_id: String,
+        /// The upstream source node.
+        source_id: String,
+        /// The unrecognized field name.
+        field: String,
+    },
+
+    /// A template placeholder `{{...}}` uses an unrecognized prefix
+    /// (not `inputs`, `metadata`, `datarouter`, or `prompt`).
+    UnrecognizedTemplate {
+        /// The node that uses the unrecognized template.
+        node_id: String,
+        /// The full template content inside `{{...}}`.
+        template: String,
     },
 
     /// Graph invariant violation during construction.
@@ -142,11 +169,32 @@ impl fmt::Display for ValidationError {
             Self::ZeroTimeout { node_id } => {
                 write!(f, "node '{}' has process_timeout_secs = 0 (would timeout immediately)", node_id)
             }
-            Self::ReferencedInputWithoutDataflow { node_id, source_id } => {
+            Self::DatarouterRefWithoutDataflow { node_id, source_id } => {
                 write!(
                     f,
-                    "node '{}' uses {{{{inputs.{}}}}} but no dataflow from '{}' to '{}' exists",
+                    "node '{}' uses {{{{datarouter.{}.xxx}}}} but no dataflow from '{}' to '{}' exists",
                     node_id, source_id, source_id, node_id,
+                )
+            }
+            Self::UnknownMetadataField { node_id, field } => {
+                write!(
+                    f,
+                    "node '{}' uses {{{{metadata.{}}}}} — unknown metadata field (valid: run_count, timed_out)",
+                    node_id, field,
+                )
+            }
+            Self::UnknownDatarouterField { node_id, source_id, field } => {
+                write!(
+                    f,
+                    "node '{}' uses {{{{datarouter.{}.{}}}}} — unknown field (valid: route, content)",
+                    node_id, source_id, field,
+                )
+            }
+            Self::UnrecognizedTemplate { node_id, template } => {
+                write!(
+                    f,
+                    "node '{}' has unrecognized template placeholder '{}' — engine supports metadata.*, datarouter.*.*",
+                    node_id, template,
                 )
             }
         }

@@ -16,7 +16,7 @@
         {
           "type": "llm",
           "command": "opencode run --format json --auto -- \"{{prompt}}\"",
-          "prompt": "Review this Rust code for bugs: {{inputs.seed}}",
+          "prompt": "Review this Rust code for bugs: {{datarouter.seed.content}}",
           "routes": ["approved", "rejected"]
         }
       ],

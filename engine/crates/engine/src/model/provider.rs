@@ -28,9 +28,9 @@ pub enum ProviderDef {
     },
     /// Execute an LLM CLI (claude, opencode, etc.) as a subprocess.
     ///
-    /// The engine renders `{{prompt}}` and `{{inputs.x}}` templates,
-    /// spawns the command, streams stderr to the log (not routing),
-    /// and parses stdout with JSON tolerance for routing.
+    /// The engine renders `{{metadata.*}}` and `{{datarouter.*.*}}`
+    /// templates, spawns the command, streams stderr to the log
+    /// (not routing), and parses stdout with JSON tolerance for routing.
     #[serde(rename = "llm")]
     Llm {
         /// Shell command template. `{{prompt}}` is replaced with the
@@ -39,8 +39,8 @@ pub enum ProviderDef {
         ///   `claude -p "{{prompt}}" --output-format json`
         ///   `opencode run --format json --auto -- "{{prompt}}"`
         command: String,
-        /// Prompt template. `{{inputs.node_id}}` is replaced with
-        /// upstream node outputs. If omitted, inputs are serialised
+        /// Prompt template. `{{metadata.*}}` and `{{datarouter.*.*}}`
+        /// are rendered by the engine. If omitted, inputs are serialised
         /// as JSON and appended to the command.
         #[serde(default)]
         prompt: Option<String>,
