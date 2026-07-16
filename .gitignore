@@ -25,6 +25,15 @@ docs/
 
 # Review / backup artifacts
 bak/
+design/
+tmp/
+nexus_evaluation_report.html
+
+# Python
+__pycache__/
+
+# Obsidian
+.obsidian/
 
 # Archives
 *.zip
