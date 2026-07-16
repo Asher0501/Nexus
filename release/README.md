@@ -108,16 +108,24 @@ release/
 │       ├── nexus-dashboard        # Linux Dashboard
 │       └── nexus-mcp-server       # Linux MCP Server
 ├── scripts/
-│   ├── llm_node.py                # LLM provider 运行时依赖
+│   ├── llm_node.py                # LLM provider 运行时依赖（CLI 模式）
+│   ├── llm_sdk.py                 # LLM SDK provider 运行时依赖（SDK 模式）
+│   ├── apply_fixes.py             # 批量应用修复脚本
+│   ├── catalog_docs.py            # 文档编目扫描脚本
+│   ├── save_fix.py                # 修复结果保存脚本
+│   ├── save_report.py             # 报告保存脚本
+│   ├── save_review.py             # 审查结果保存脚本
 │   ├── node_ok.bat                # 通用 OK 信号节点
 │   ├── node_approved.bat          # approved 路由节点
 │   ├── node_rejected.bat          # rejected 路由节点
-│   └── sleep3.bat                 # 超时测试节点
+│   ├── sleep3.bat                 # 超时测试节点
+│   ├── fix_task.md                # 修复任务定义
+│   └── review_task.md             # 审查任务定义
 ├── static/                        # Dashboard 前端 + 示范工作流
 │   ├── index.html                 # Dashboard SPA
 │   ├── arch-review-loop.json      # 架构检视工作流
 │   └── review-loop.json           # 通用检视循环工作流
-├── examples/                      # 示例工作流 JSON
+├── examples/                      # 示例工作流 JSON（13 个文件，含 claude-test.json, llm-sdk-test.json, self-supervised-doc-review-fix.json 等）
 ├── QUICKSTART.md                  # 快速入门指南（含 c2/c3/c4 示范用例）
 ├── WORKFLOW_REFERENCE.md          # 工作流定义完整参考
 ├── NEXUS_WORKFLOW_SKILL.md        # Claude Code 生成工作流的 Skill 参考
@@ -127,12 +135,17 @@ release/
 ## 系统要求
 
 - **Windows 10+ (x86_64)** — 提供预编译二进制文件
-- **Linux / macOS** — 需从源码构建（见下方构建说明）
+- **Linux (x86_64)** — 提供预编译二进制文件（`bin/linux/`）
+- **macOS** — 需从源码构建（见下方构建说明）
 - 预编译二进制文件开箱即用，无需安装 VC++ Redistributable 等额外运行时
 - **`type: "llm"` 节点依赖**：
   - **Python 3** — 引擎通过内置 `scripts/llm_node.py` wrapper 调用 LLM CLI。需在系统 PATH 中
   - **Claude Code CLI** (`claude`) — LLM 节点的默认 CLI。通过 npm 安装：`npm install -g @anthropic-ai/claude-code`
   - 也可替换为其他 CLI（opencode、nga 等），修改 `command` 字段即可
+- **`type: "llm_sdk"` 节点依赖**：
+  - **Python 3 + `pip install anthropic`** — SDK 模式通过 Python 直调 Anthropic API
+  - **`ANTHROPIC_API_KEY`** 环境变量 — 或 `ANTHROPIC_AUTH_TOKEN`，或 `~/.claude/settings.json` 中的 API key
+  - **`ANTHROPIC_BASE_URL`** — 使用 DeepSeek 等非 Anthropic 端点时需设置
 - **`.bat` 脚本仅适用于 Windows**。Linux/macOS 需用 shell 等价脚本（如 `echo '{"route":"ok","content":"done"}'`）
 - 二进制文件可放到任意目录或加入 `PATH`。命令中的 `scripts/` 相对路径会自动解析为 exe 所在目录的 `../scripts/`，无需特意 cd 到 release 目录
 - 如使用自定义 `scripts/` 路径，可通过 `NEXUS_LLM_WRAPPER` 环境变量覆盖
@@ -142,7 +155,11 @@ release/
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `NEXUS_LLM_WRAPPER` | 自动检测 | LLM node Python wrapper 路径。默认基于 exe 位置自动解析（`{exe_dir}/../scripts/llm_node.py`），也可手动设置为绝对路径 |
+| `NEXUS_LLM_SDK_WRAPPER` | 自动检测 | LLM SDK Python wrapper 路径。默认基于 exe 位置自动解析（`{exe_dir}/../scripts/llm_sdk.py`），也可手动设置为绝对路径 |
+| `ANTHROPIC_API_KEY` | — | Anthropic API 密钥。llm_sdk 节点的默认凭证来源 |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Anthropic API 端点 URL。使用 DeepSeek 等非 Anthropic 端点时设置 |
 | `NEXUS_HOST` | `127.0.0.1` | Dashboard HTTP 监听地址 |
+| `NEXUS_SCRIPTS_DIR` | 自动检测 | 全局脚本目录。参与 `{{node_dir}}` 解析链（节点级 `scripts_dir` > 工作流级 > 此变量 > exe 搜索 > `./scripts`） |
 | `NEXUS_PORT` | `48080` | Dashboard HTTP 监听端口 |
 
 示例：自定义端口和 LLM wrapper 路径：

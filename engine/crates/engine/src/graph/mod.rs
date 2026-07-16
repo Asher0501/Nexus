@@ -31,4 +31,4 @@ pub use data_router::DataRouter;
 pub use edge::{EdgeDef, EdgeState, Strategy};
 pub use graph_def::{GraphDef, NodeData, NodeParams, NodeTransfer};
 pub use scheduler::{NodeCounters, NodeResult, NodeState, NodeStatus, RuntimeState, Scheduler};
-pub use validator::validate;
+pub use validator::{validate, validate_warnings};

@@ -1,4 +1,4 @@
-//! SQLite persistence layer for workflows and runs.
+//! `SQLite` persistence layer for workflows and runs.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, Result};
 
 use crate::models::{RunRow, WorkflowRow};
 
-/// Thread-safe SQLite store for dashboards.
+/// Thread-safe `SQLite` store for dashboards.
 ///
 /// Uses `Mutex<Connection>` since rusqlite's `Connection` is not `Send`.
 /// All public methods are blocking — callers should wrap in `tokio::task::spawn_blocking`
@@ -20,7 +20,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open (or create) the SQLite database at `path`.
+    /// Open (or create) the `SQLite` database at `path`.
     ///
     /// When `path` is `None`, uses `{data_dir}/nexus/dashboard.db` on supported platforms,
     /// or `.nexus/dashboard.db` relative to the current directory as fallback.

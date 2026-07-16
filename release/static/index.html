@@ -34,6 +34,8 @@ td { font-size: 13px; }
 .btn:hover { background: #1e3a5f; }
 .btn-primary { background: var(--accent); border-color: var(--accent); }
 .btn-primary:hover { background: #2563eb; }
+.btn-danger { background: #f87171; border-color: #ef4444; color: #fff; }
+.btn-danger:hover { background: #ef4444; }
 .btn-danger { border-color: var(--red); color: var(--red); }
 .btn-danger:hover { background: #3b1010; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
@@ -71,9 +73,35 @@ textarea { font-family: 'Cascadia Code','Fira Code',monospace; min-height: 200px
 .form-group label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; }
 .spin { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Node detail panel */
+#node-panel{position:fixed;top:0;right:-440px;width:440px;height:100vh;background:var(--card);
+  border-left:2px solid var(--accent);z-index:200;transition:right .25s ease;overflow-y:auto;
+  padding:20px 24px;box-shadow:-4px 0 24px rgba(0,0,0,.5);}
+#node-panel.open{right:0}
+#node-panel h3{font-size:16px;margin-bottom:4px;color:var(--accent)}
+#node-panel h4{font-size:11px;color:var(--muted);text-transform:uppercase;margin:16px 0 6px;letter-spacing:.5px}
+#node-panel .close-btn{position:absolute;top:10px;right:14px;background:none;border:none;
+  color:var(--muted);font-size:24px;cursor:pointer;line-height:1}
+#node-panel .close-btn:hover{color:var(--text)}
+#node-panel .kv{display:flex;margin-bottom:3px;font-size:12px}
+#node-panel .kv-k{color:var(--muted);width:110px;flex-shrink:0}
+#node-panel .kv-v{color:var(--text);word-break:break-all;font-family:monospace;font-size:11px}
+#node-panel .prompt-block{background:var(--bg);border:1px solid var(--border);
+  border-radius:6px;padding:10px;font:11px/1.5 monospace;max-height:240px;
+  overflow-y:auto;white-space:pre-wrap;word-break:break-all;color:var(--muted)}
+#node-panel .tag{display:inline-block;padding:1px 7px;border-radius:4px;
+  font-size:10px;margin:1px 2px;background:#1e3a5f;color:#60a5fa}
+#node-panel .g-tag{background:#1a3a2a;color:#4ade80}
+#node-panel .r-tag{background:#3a2a1a;color:#facc15}
+#node-panel .no-data{color:var(--muted);font-size:12px;font-style:italic}
+#overlay{position:fixed;top:0;left:0;width:100vw;height:100vh;
+  background:rgba(0,0,0,.35);z-index:199;display:none}
+#overlay.show{display:block}
 </style>
 </head>
 <body>
+<div id="overlay"></div>
+<div id="node-panel"><button class="close-btn" onclick="closeNodePanel()">&times;</button><div id="node-panel-content"></div></div>
 <div id="app">
   <header>
     <h1>Nexus Dashboard</h1>
@@ -102,6 +130,8 @@ let dagReady = false, pendingStatuses = [];
 let logs = [], wsConnection = null;
 let nodeStates = {};
 let activeRunId = null;
+let currentGraph = null; // {nodes:[],edges:[],dataflows:[]} for the active view
+let currentWfDef = null; // full workflow object (definition parsed)
 
 // Persist logs + node states to sessionStorage so they survive refresh.
 function saveState() {
@@ -180,6 +210,7 @@ document.getElementById('content').addEventListener('click', e => {
     case 'show-create-wf': showCreateWorkflow(); break;
     case 'create-wf': createWorkflow(); break;
     case 'cancel-form': nav(); break;
+    case 'stop-run': stopRun(id); break;
     case 'goto': location.hash = btn.dataset.hash || '#' + id; break;
   }
 });
@@ -294,6 +325,22 @@ async function triggerRun(wfId) {
   }
 }
 
+async function stopRun(runId) {
+  var btn = document.getElementById('stop-run-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Stopping...'; }
+  try {
+    await POST('/api/runs/' + runId + '/stop');
+    toast('Stop requested — pending nodes will be skipped');
+    if (btn) btn.remove();
+    // Update badge immediately so user sees feedback
+    var badge = document.getElementById('run-status-badge');
+    if (badge) { badge.textContent = 'stopping'; badge.className = 'badge badge-Failed'; }
+  } catch(e) {
+    toast('Stop failed: ' + e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '⏹ Stop'; }
+  }
+}
+
 // ── Workflow Detail ─────────────────────────────────────────────
 async function renderWorkflowDetail(id) {
   let wf, graph = { nodes:[], edges:[], dataflows:[] };
@@ -301,6 +348,7 @@ async function renderWorkflowDetail(id) {
   if (!wf || wf.error) { showError(wf?.error || 'Not found'); return; }
   currentWfDef = wf;
   try { graph = await GET('/api/workflows/' + id + '/graph'); } catch(e) {}
+  currentGraph = graph;
   document.getElementById('content').innerHTML = `
     <div class="meta">
       <span>ID: <code>${id.slice(0,8)}</code></span>
@@ -311,7 +359,7 @@ async function renderWorkflowDetail(id) {
       <button class="btn btn-primary" data-action="trigger-run" data-id="${id}">▶ Run</button>
       <button class="btn" data-action="goto" data-hash="#/workflows">← Back</button>
     </div>
-    <div class="card"><h2>DAG Topology</h2><div id="dag-view" class="dag-container"></div></div>`;
+    <div class="card"><h2>DAG Topology</h2><div class="dag-node-hint">🖱 Click a node to see details</div><div id="dag-view" class="dag-container"></div></div>`;
   if (graph.nodes && graph.nodes.length) initDAG('dag-view', graph);
 }
 
@@ -346,14 +394,17 @@ async function renderRunMonitor(runId) {
   try { run = await GET('/api/runs/' + runId); } catch(e) { showError('Run not found'); return; }
   if (run.error) { showError(run.error); return; }
 
-  let graph = { nodes:[], edges:[] };
+  let graph = { nodes:[], edges:[], dataflows:[] };
   try { graph = await GET('/api/workflows/' + run.workflow_id + '/graph'); } catch(e) {}
+  try { currentWfDef = await GET('/api/workflows/' + run.workflow_id); } catch(e) { currentWfDef = null; }
+  currentGraph = graph;
 
   // Init node status panel from graph data — only for nodes not yet seen.
   (graph.nodes||[]).forEach(function(n) {
     if (!nodeStates[n.id]) nodeStates[n.id] = { status: 'Pending', ts: 0 };
   });
 
+  var isRunning = run.status === 'accepted' || run.status === 'running';
   document.getElementById('content').innerHTML = `
     <div class="meta">
       <span>Run: <code>${runId.slice(0,8)}</code></span>
@@ -361,7 +412,8 @@ async function renderRunMonitor(runId) {
       <span>Started: ${run.started_at||'pending...'}</span>
     </div>
     <button class="btn" data-action="goto" data-hash="#/runs">← All Runs</button>
-    <div class="card" style="margin-top:16px;margin-bottom:16px"><h2>Live DAG</h2><div id="dag-live" class="dag-container"></div></div>
+    ${isRunning ? `<button class="btn btn-danger" id="stop-run-btn" data-action="stop-run" data-id="${runId}">⏹ Stop</button>` : ''}
+    <div class="card" style="margin-top:16px;margin-bottom:16px"><h2>Live DAG</h2><div class="dag-node-hint">🖱 Click a node to see details</div><div id="dag-live" class="dag-container"></div></div>
     <div class="row">
       <div class="col"><div class="card"><h2>Node Status</h2><div id="status-panel" style="font-size:13px;max-height:300px;overflow-y:auto"><span style="color:var(--muted)">Waiting...</span></div></div></div>
       <div class="col"><div class="card"><h2>Raw Log</h2><div id="log-panel" class="log-panel"><span style="color:var(--muted)">Waiting for events...</span></div></div></div>
@@ -469,17 +521,24 @@ function initDAG(containerId, graphData) {
       interaction: { hover: true, dragNodes: false },
     });
 
+    // Click handler: show node detail panel
+    dagNetwork.on('click', function(params) {
+      if (params.nodes.length > 0) {
+        showNodeDetail(params.nodes[0]);
+      }
+    });
+
     dagReady = true;
     // Replay buffered WS statuses
     for (var i = 0; i < pendingStatuses.length; i++) {
       var s = pendingStatuses[i];
-      dagNodes.update({ id: s.nodeId, color: { background: STATUS_COLORS[s.status] || '#64748b' } });
+      dagNodes.update({ id: s.nodeId, color: { background: STATUS_COLORS[s.status] || '#64748b', border: '#334155' } });
     }
     pendingStatuses = [];
     // Restore DAG colors from sessionStorage (survives refresh)
     for (var nid in nodeStates) {
       if (nodeStates.hasOwnProperty(nid)) {
-        dagNodes.update({ id: nid, color: { background: STATUS_COLORS[nodeStates[nid].status] || '#64748b' } });
+        dagNodes.update({ id: nid, color: { background: STATUS_COLORS[nodeStates[nid].status] || '#64748b', border: '#334155' } });
       }
     }
   } catch(e) {
@@ -494,7 +553,7 @@ function updateNodeStatus(nodeId, status) {
   saveState();
   renderStatusPanel();
   if (dagReady && dagNodes) {
-    dagNodes.update({ id: nodeId, color: { background: STATUS_COLORS[status] || '#64748b' } });
+    dagNodes.update({ id: nodeId, color: { background: STATUS_COLORS[status] || '#64748b', border: '#334155' } });
   } else {
     pendingStatuses.push({ nodeId, status });
   }
@@ -531,7 +590,20 @@ function connectWS(runId) {
     appendLog('ws', 'Failed to connect: ' + e.message, Date.now());
     return;
   }
-  wsConnection.onopen = () => appendLog('ws', 'Connected to run ' + runId.slice(0,8), Math.floor(Date.now()/1000));
+  wsConnection.onopen = () => {
+    appendLog('ws', 'Connected to run ' + runId.slice(0,8), Math.floor(Date.now()/1000));
+    // Sync DAG: push all known node states to the vis-network on connect.
+    // Covers timing gaps where statuses arrived before the DAG was ready
+    // or before the WS connection was established.
+    if (dagReady && dagNodes) {
+      for (var nid in nodeStates) {
+        if (nodeStates.hasOwnProperty(nid)) {
+          var bg = STATUS_COLORS[nodeStates[nid].status] || '#64748b';
+          dagNodes.update({ id: nid, color: { background: bg, border: '#334155' } });
+        }
+      }
+    }
+  };
   wsConnection.onmessage = e => {
     try {
       const msg = JSON.parse(e.data);
@@ -593,6 +665,147 @@ function esc(s) {
   d.textContent = String(s);
   return d.innerHTML;
 }
+
+// ── Node Detail Panel ────────────────────────────────────────────
+function showNodeDetail(nodeId) {
+  var panel = document.getElementById('node-panel');
+  var overlay = document.getElementById('overlay');
+  var content = document.getElementById('node-panel-content');
+  if (!panel || !content) return;
+
+  // Find node info from currentGraph + currentWfDef
+  var nodeDef = null;
+  if (currentWfDef) {
+    var def = currentWfDef.definition || currentWfDef;
+    // definition might be a string (JSON) or object
+    try {
+      if (typeof def === 'string') def = JSON.parse(def);
+    } catch(e) {}
+    var nodes = def.nodes || [];
+    nodeDef = nodes.find(function(n) { return n.id === nodeId; });
+  }
+
+  // Edges from/to this node
+  var graphEdges = (currentGraph && currentGraph.edges) ? currentGraph.edges : [];
+  var dataflows = (currentGraph && currentGraph.dataflows) ? currentGraph.dataflows : [];
+  var inEdges = graphEdges.filter(function(e) { return e.to === nodeId; });
+  var outEdges = graphEdges.filter(function(e) { return e.from === nodeId; });
+  var dfIn = dataflows.filter(function(d) { return d.to === nodeId; });
+  var dfOut = dataflows.filter(function(d) { return d.from === nodeId; });
+
+  if (!nodeDef) {
+    content.innerHTML = '<h3>' + esc(nodeId) + '</h3><div class="no-data">No definition data available for this node. Run info only.</div>';
+  } else {
+    var provider = (nodeDef.providers && nodeDef.providers.length) ? nodeDef.providers[0] : {};
+    var ptype = provider.type || '?';
+
+    var html = '<h3>' + esc(nodeId) + '</h3>';
+
+    // Basic info
+    html += '<h4>Basic</h4>';
+    html += '<div class="kv"><span class="kv-k">Provider</span><span class="kv-v">' + esc(ptype) + '</span></div>';
+    html += '<div class="kv"><span class="kv-k">Timeout</span><span class="kv-v">' + esc(String(nodeDef.process_timeout_secs || '?')) + 's</span></div>';
+    if (nodeDef.max_retries != null) html += '<div class="kv"><span class="kv-k">Max Retries</span><span class="kv-v">' + esc(String(nodeDef.max_retries)) + '</span></div>';
+    if (nodeDef.returns && nodeDef.returns.length) {
+      html += '<div class="kv"><span class="kv-k">Returns</span><span class="kv-v">';
+      nodeDef.returns.forEach(function(r) { html += '<span class="tag">' + esc(r) + '</span> '; });
+      html += '</span></div>';
+    }
+
+    // Route policy
+    if (nodeDef.route_policy) {
+      var rp = nodeDef.route_policy;
+      html += '<h4>Route Policy</h4>';
+      html += '<div class="kv"><span class="kv-k">Type</span><span class="kv-v">' + esc(rp.type || '?') + '</span></div>';
+      html += '<div class="kv"><span class="kv-k">Max Runs</span><span class="kv-v">' + esc(String(rp.max != null ? rp.max : '?')) + '</span></div>';
+      html += '<div class="kv"><span class="kv-k">Then Route</span><span class="kv-v">' + esc(rp.then_route || '?') + '</span></div>';
+    }
+
+    // Provider-specific
+    html += '<h4>Provider Config</h4>';
+    if (ptype === 'llm_sdk' || ptype === 'llm') {
+      html += '<div class="kv"><span class="kv-k">Model</span><span class="kv-v">' + esc(provider.model || '(CLI)') + '</span></div>';
+      if (provider.max_tokens) html += '<div class="kv"><span class="kv-k">Max Tokens</span><span class="kv-v">' + esc(String(provider.max_tokens)) + '</span></div>';
+      if (provider.routes && provider.routes.length) {
+        html += '<div class="kv"><span class="kv-k">Routes</span><span class="kv-v">';
+        provider.routes.forEach(function(r) { html += '<span class="tag g-tag">' + esc(r) + '</span> '; });
+        html += '</span></div>';
+      }
+      if (provider.system_prompt) {
+        html += '<h4>System Prompt</h4><div class="prompt-block">' + esc(provider.system_prompt) + '</div>';
+      }
+      if (provider.command) {
+        html += '<h4>Command</h4><div class="prompt-block">' + esc(provider.command) + '</div>';
+      }
+      if (provider.prompt) {
+        html += '<h4>Prompt</h4><div class="prompt-block">' + esc(provider.prompt) + '</div>';
+      }
+    } else if (ptype === 'shell' || ptype === 'subprocess') {
+      if (provider.command) {
+        html += '<h4>Command</h4><div class="prompt-block">' + esc(provider.command) + '</div>';
+      }
+    }
+
+    // Status (from run monitor)
+    if (nodeStates[nodeId]) {
+      html += '<h4>Run Status</h4>';
+      var st = nodeStates[nodeId];
+      var color = STATUS_COLORS[st.status] || '#64748b';
+      html += '<div class="kv"><span class="kv-k">Status</span><span class="kv-v"><span class="badge badge-' + st.status + '">' + esc(st.status) + '</span></span></div>';
+    }
+  }
+
+  // Topology (always show)
+  html += '<h4>Topology</h4>';
+  // Incoming edges
+  html += '<div style="margin-bottom:4px"><span style="color:var(--muted);font-size:11px">Incoming edges (' + inEdges.length + '):</span><br>';
+  if (inEdges.length) {
+    inEdges.forEach(function(e) {
+      var parts = [esc(e.from), 'trigger:' + esc(e.trigger||'?'), 'event:' + esc(e.event||'?')];
+      if (e.exit_reason) parts.push('exit_reason:' + esc(e.exit_reason));
+      html += '<span class="tag r-tag">' + parts.join(' | ') + '</span><br>';
+    });
+  } else { html += '<span class="no-data">none</span><br>'; }
+  html += '</div>';
+  // Outgoing edges
+  html += '<div style="margin-bottom:4px"><span style="color:var(--muted);font-size:11px">Outgoing edges (' + outEdges.length + '):</span><br>';
+  if (outEdges.length) {
+    outEdges.forEach(function(e) {
+      var parts = [esc(e.to), 'trigger:' + esc(e.trigger||'?'), 'event:' + esc(e.event||'?')];
+      if (e.exit_reason) parts.push('exit_reason:' + esc(e.exit_reason));
+      html += '<span class="tag r-tag">' + parts.join(' | ') + '</span><br>';
+    });
+  } else { html += '<span class="no-data">none</span><br>'; }
+  html += '</div>';
+  // Dataflows
+  html += '<div><span style="color:var(--muted);font-size:11px">Dataflows — receives from (' + dfIn.length + '):</span><br>';
+  if (dfIn.length) {
+    dfIn.forEach(function(d) {
+      var alias = d.alias ? ' (as ' + esc(d.alias) + ')' : '';
+      html += '<span class="tag g-tag">← ' + esc(d.from) + alias + '</span><br>';
+    });
+  } else { html += '<span class="no-data">none</span><br>'; }
+  html += '<span style="color:var(--muted);font-size:11px">Dataflows — sends to (' + dfOut.length + '):</span><br>';
+  if (dfOut.length) {
+    dfOut.forEach(function(d) {
+      var alias = d.alias ? ' (as ' + esc(d.alias) + ')' : '';
+      html += '<span class="tag g-tag">→ ' + esc(d.to) + alias + '</span><br>';
+    });
+  } else { html += '<span class="no-data">none</span><br>'; }
+  html += '</div>';
+
+  content.innerHTML = html;
+  panel.classList.add('open');
+  overlay.classList.add('show');
+}
+
+function closeNodePanel() {
+  var panel = document.getElementById('node-panel');
+  var overlay = document.getElementById('overlay');
+  if (panel) panel.classList.remove('open');
+  if (overlay) overlay.classList.remove('show');
+}
+document.getElementById('overlay').addEventListener('click', closeNodePanel);
 </script>
 </body>
 </html>

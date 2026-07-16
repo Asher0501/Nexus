@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// How a node is executed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ProviderDef {
     /// Execute as a subprocess (direct spawn, no shell).
@@ -17,14 +17,25 @@ pub enum ProviderDef {
         /// The command to execute (will be wrapped in cmd /c or sh -c).
         command: String,
     },
-    /// Execute via HTTP call (placeholder for future implementation).
+    /// Execute via HTTP call.
     #[serde(rename = "http")]
     Http {
-        /// The URL to call.
+        /// The URL to call.  Supports template interpolation
+        /// (`{{datarouter.*.*}}`, `{{metadata.*}}`).
         url: String,
-        /// HTTP method (defaults to POST).
+        /// HTTP method (GET, POST, PUT, DELETE, PATCH).
+        /// Defaults to GET if omitted.
         #[serde(default)]
         method: Option<String>,
+        /// Optional HTTP headers (e.g. `Authorization`, `Content-Type`).
+        /// Keys and values support template interpolation.
+        #[serde(default)]
+        headers: Option<std::collections::HashMap<String, String>>,
+        /// Optional request body (UTF-8 string).
+        /// Supports template interpolation.
+        /// Default `Content-Type` is `application/json` when body is present.
+        #[serde(default)]
+        body: Option<String>,
     },
     /// Execute an LLM CLI (claude, opencode, etc.) as a subprocess.
     ///
@@ -50,6 +61,30 @@ pub enum ProviderDef {
         routes: Vec<String>,
         /// Maximum output tokens (passed to CLI if it supports the flag).
         /// `None` means "let the CLI use its default."
+        #[serde(default)]
+        max_tokens: Option<u64>,
+    },
+    /// Execute an LLM via the Anthropic Python SDK.
+    #[serde(rename = "llm_sdk")]
+    LlmSdk {
+        /// The model identifier to use.
+        model: String,
+        /// Environment variable containing the API key.
+        #[serde(default)]
+        api_key_env: Option<String>,
+        /// System-level prompt template.
+        #[serde(default)]
+        system_prompt: Option<String>,
+        /// Prompt template. `{{metadata.*}}` and `{{datarouter.*.*}}`
+        /// are rendered by the engine.
+        #[serde(default)]
+        prompt: Option<String>,
+        /// Expected route values. Injected into the prompt as guidance
+        /// so the LLM knows which routes are valid.
+        #[serde(default)]
+        routes: Vec<String>,
+        /// Maximum output tokens.
+        /// `None` means "let the API use its default."
         #[serde(default)]
         max_tokens: Option<u64>,
     },

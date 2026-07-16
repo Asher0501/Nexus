@@ -14,13 +14,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::predecessor::EventType;
 
-/// g_e strategy: how to aggregate multiple source-node readiness signals.
+/// `g_e` strategy: how to aggregate multiple source-node readiness signals.
 ///
-/// Corresponds to the g_e function in the h+g decomposition:
+/// Corresponds to the `g_e` function in the h+g decomposition:
 /// - `Any` (∨): single source ready → trigger downstream.
 /// - `All` (∧): all sources ready → trigger downstream.
 ///
-/// All/Any are complete (see DESIGN_PHILOSOPHY.md §〇 推论 3).
+/// All/Any are complete (see `DESIGN_PHILOSOPHY.md` §〇 推论 3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Strategy {
     /// All source nodes must signal readiness before the edge fires.
@@ -29,34 +29,34 @@ pub enum Strategy {
     Any,
 }
 
-/// h_e parameters + g_e strategy — pure data, runtime read-only.
+/// `h_e` parameters + `g_e` strategy — pure data, runtime read-only.
 ///
-/// Represents a directed trigger edge e = (from, to, h_e, g_e).
-/// - h_e: branch matching (event_type, exit_reason, threshold)
-/// - g_e: strategy aggregation (strategy)
+/// Represents a directed trigger edge e = (from, to, `h_e`, `g_e`).
+/// - `h_e`: branch matching (`event_type`, `exit_reason`, threshold)
+/// - `g_e`: strategy aggregation (strategy)
 #[derive(Debug, Clone)]
 pub struct EdgeDef {
     /// Source node index (`v ∈ V`).
     pub from: NodeIndex,
     /// Target node index (`w ∈ V`).
     pub to: NodeIndex,
-    /// h_e: event type that this edge responds to.
+    /// `h_e`: event type that this edge responds to.
     pub event_type: EventType,
-    /// h_e: optional exit_reason filter (exact string match).
+    /// `h_e`: optional `exit_reason` filter (exact string match).
     pub exit_reason: Option<String>,
-    /// h_e: threshold — number of matching events required before the edge fires.
+    /// `h_e`: threshold — number of matching events required before the edge fires.
     pub threshold: u64,
-    /// g_e: strategy — Any (∨) or All (∧).
+    /// `g_e`: strategy — Any (∨) or All (∧).
     pub strategy: Strategy,
 }
 
-/// Edge runtime state — h_e's threshold counter only.
+/// Edge runtime state — `h_e`'s threshold counter only.
 ///
-/// No triggered state — h_e is a pure function. Every event independently
-/// evaluates all matching edges. See theory/NODE_TRANSFER.md.
+/// No triggered state — `h_e` is a pure function. Every event independently
+/// evaluates all matching edges. See `theory/NODE_TRANSFER.md`.
 #[derive(Debug, Clone, Default)]
 pub struct EdgeState {
-    /// h_e: number of matching events received so far (for threshold).
+    /// `h_e`: number of matching events received so far (for threshold).
     pub event_count: u64,
 }
 

@@ -37,7 +37,7 @@ pub struct NodeSnapshot {
 /// A point-in-time view of the entire engine's runtime state.
 #[derive(Debug, Clone)]
 pub struct EngineSnapshot {
-    /// Nodes, keyed by node_id (workflow-definition ID).
+    /// Nodes, keyed by `node_id` (workflow-definition ID).
     pub nodes: HashMap<String, NodeSnapshot>,
     /// Wall-clock time since the engine started.
     pub elapsed: Duration,
@@ -78,15 +78,13 @@ impl EngineSnapshot {
                 .state()
                 .states
                 .get(&idx)
-                .map(|ns| ns.status)
-                .unwrap_or(NodeStatus::Pending);
+                .map_or(NodeStatus::Pending, |ns| ns.status);
 
             let result = scheduler
                 .state()
                 .states
                 .get(&idx)
-                .map(|ns| ns.result.clone())
-                .unwrap_or(NodeResult::None);
+                .map_or(NodeResult::None, |ns| ns.result.clone());
 
             let counters = scheduler
                 .state()
@@ -166,13 +164,13 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
 
         let mut index = HashMap::new();
@@ -223,7 +221,7 @@ mod tests {
         let snapshot = EngineSnapshot::capture(&scheduler, Instant::now());
         let display = snapshot.to_string();
         assert!(display.contains("Engine Snapshot"));
-        assert!(display.contains("A"));
-        assert!(display.contains("B"));
+        assert!(display.contains('A'));
+        assert!(display.contains('B'));
     }
 }

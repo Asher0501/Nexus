@@ -42,6 +42,32 @@ impl Default for NodeContext {
     }
 }
 
+impl NodeContext {
+    /// Remove lone surrogates (U+D800–U+DFFF) from all string fields.
+    ///
+    /// These invalid Unicode code points can leak in via Windows console API
+    /// transcoding or `serde_json` escape sequences.  They are never
+    /// intentional — they are always encoding artefacts — and they break
+    /// UTF-8 encoding downstream (Python `json.dumps`, Anthropic SDK, etc.).
+    pub fn sanitize_surrogates(&mut self) {
+        for (_, v) in &mut self.inputs {
+            strip_surrogates(v);
+        }
+        for (_, v) in &mut self.extensions {
+            strip_surrogates(v);
+        }
+        for (_, v) in &mut self.upstream {
+            strip_surrogates(&mut v.route);
+            strip_surrogates(&mut v.content);
+        }
+    }
+}
+
+/// Strip lone surrogate code points from a string in place.
+fn strip_surrogates(s: &mut String) {
+    s.retain(|c| !(0xD800..=0xDFFF).contains(&(c as u32)));
+}
+
 /// An output chunk emitted by a node during execution (streaming).
 ///
 /// This is distinct from the final [`NodeOutput`], which is the complete
@@ -54,7 +80,7 @@ pub struct NodeChunk {
 
 /// A structured output from a node, carrying both the routing key
 /// and the content payload. Emitted as JSON on stdout so the engine
-/// can match edges by route and forward content via the DataRouter.
+/// can match edges by route and forward content via the `DataRouter`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeOutput {
     /// Logical route key for edge matching.
@@ -74,7 +100,7 @@ pub mod exit_codes {
     /// Process exited normally with code 0.
     #[allow(dead_code)]
     pub const SUCCESS: i32 = 0;
-    /// wait() failed or no exit code available.
+    /// `wait()` failed or no exit code available.
     pub const WAIT_FAILED: i32 = -1;
     /// Killed by engine due to timeout.
     pub const TIMEOUT: i32 = -9;
@@ -96,9 +122,9 @@ pub struct NodeOutcome {
 }
 
 impl NodeOutcome {
-    /// Whether the node was killed due to timeout (exit_code == -9).
+    /// Whether the node was killed due to timeout (`exit_code` == -9).
     #[must_use]
-    pub fn timed_out(&self) -> bool {
+    pub const fn timed_out(&self) -> bool {
         self.exit_code == exit_codes::TIMEOUT
     }
 }
@@ -117,3 +143,74 @@ impl std::fmt::Display for SpawnError {
 }
 
 impl std::error::Error for SpawnError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a string containing a lone surrogate at the given code point.
+    /// Lone surrogates have valid UTF-8 encodings (they're just not valid
+    /// Unicode *scalar values*), so they can exist in Rust Strings via
+    /// byte manipulation or serde_json parsing.
+    fn surrogate_str(code: u16) -> String {
+        assert!((0xD800..=0xDFFF).contains(&code));
+        // UTF-8 encoding of a 3-byte sequence: 0xED 0x?? 0x??
+        let c = code as u32;
+        let b = [
+            0xEDu8,
+            (0x80 | ((c >> 6) & 0x3F)) as u8,
+            (0x80 | (c & 0x3F)) as u8,
+        ];
+        String::from_utf8(b.to_vec()).unwrap_or_default()
+    }
+
+    #[test]
+    fn strip_surrogates_removes_lone_surrogate() {
+        let mut s = format!("hello{}world", surrogate_str(0xD800));
+        strip_surrogates(&mut s);
+        assert_eq!(s, "helloworld");
+    }
+
+    #[test]
+    fn strip_surrogates_preserves_valid_unicode() {
+        // U+00E9 = é, U+4E2D = 中 — both valid, must be kept
+        let mut s = String::from("caf\u{00E9}\u{4E2D}");
+        let expected = s.clone();
+        strip_surrogates(&mut s);
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn strip_surrogates_handles_multiple_surrogates() {
+        let mut s = format!("a{}b{}c", surrogate_str(0xDC00), surrogate_str(0xDFFF));
+        strip_surrogates(&mut s);
+        assert_eq!(s, "abc");
+    }
+
+    #[test]
+    fn sanitize_node_context_cleans_all_fields() {
+        let mut ctx = NodeContext {
+            inputs: std::collections::HashMap::from([(
+                "k".into(),
+                format!("v{}al", surrogate_str(0xD800)),
+            )]),
+            extensions: std::collections::HashMap::from([(
+                "e".into(),
+                format!("x{}y", surrogate_str(0xDFFF)),
+            )]),
+            metadata: NodeMetadata { run_count: 1, timed_out: false },
+            upstream: std::collections::HashMap::from([(
+                "u".into(),
+                NodeOutput {
+                    route: format!("r{}", surrogate_str(0xDC00)),
+                    content: format!("c{}", surrogate_str(0xD800)),
+                },
+            )]),
+        };
+        ctx.sanitize_surrogates();
+        assert_eq!(ctx.inputs["k"], "val");
+        assert_eq!(ctx.extensions["e"], "xy");
+        assert_eq!(ctx.upstream["u"].route, "r");
+        assert_eq!(ctx.upstream["u"].content, "c");
+    }
+}

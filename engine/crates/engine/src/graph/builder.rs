@@ -78,6 +78,7 @@ impl Builder {
                 process_timeout_secs: node_def.process_timeout_secs,
                 route_policy: node_def.route_policy.clone(),
                 max_retries: node_def.max_retries,
+                scripts_dir: node_def.scripts_dir.clone(),
             };
             let idx = graph.add_node(node_data);
             index.insert(node_def.id.clone(), idx);
@@ -125,7 +126,7 @@ impl Builder {
             edges.push(EdgeDef {
                 from: from_idx,
                 to: index[&edge_def.to],
-                event_type: edge_def.event.clone(),
+                event_type: edge_def.event,
                 exit_reason: edge_def.exit_reason.clone(),
                 threshold: edge_def.threshold,
                 strategy: match edge_def.trigger {
@@ -210,7 +211,7 @@ mod tests {
         }],
         process_timeout_secs: 10,
         returns: vec![],
-        max_retries: None, route_policy: None }
+        max_retries: None, route_policy: None, scripts_dir: None }
     }
 
     fn sched_edge(from: &str, to: &str) -> SchedulingEdgeDef {
@@ -233,6 +234,7 @@ mod tests {
             nodes: vec![make_node("A"), make_node("B"), make_node("C")],
             edges: vec![sched_edge("A", "B"), sched_edge("B", "C")],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let graph = Builder::build(&def).expect("3-node chain should build");
         assert_eq!(graph.node_count(), 3);
@@ -258,6 +260,7 @@ mod tests {
                 sched_edge("C", "D"),
             ],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let graph = Builder::build(&def).expect("fan-out/fan-in should build");
         assert_eq!(graph.node_count(), 4);
@@ -278,6 +281,7 @@ mod tests {
             nodes: vec![make_node("X"), make_node("X")],
             edges: vec![],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = Builder::build(&def);
         assert!(result.is_err(), "duplicate ID should fail");
@@ -302,6 +306,7 @@ mod tests {
                 threshold: 1,
             }],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = Builder::build(&def);
         assert!(result.is_err(), "invalid predecessor should fail");
@@ -315,6 +320,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let graph = Builder::build(&def).expect("empty graph should build");
         assert_eq!(graph.node_count(), 0);
@@ -330,6 +336,7 @@ mod tests {
             nodes: vec![make_node("A")],
             edges: vec![],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let graph = Builder::build(&def).expect("single node should build");
         assert_eq!(graph.node_count(), 1);
@@ -356,6 +363,7 @@ mod tests {
                     returns: vec!["ok".into()],
                     max_retries: Some(5),
                     route_policy: None,
+                    scripts_dir: None,
                 },
                 make_node("collector"),
             ],
@@ -365,6 +373,7 @@ mod tests {
                 to: "worker".into(),
                 alias: None,
             }],
+            scripts_dir: None,
         };
         let graph = Builder::build(&def).expect("should build");
         let worker_idx = graph
@@ -403,6 +412,7 @@ mod tests {
                 },
             ],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let graph = Builder::build(&def).expect("should build");
         assert_eq!(graph.edge_count(), 2);
@@ -444,6 +454,7 @@ mod tests {
                 },
             ],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let graph = Builder::build(&def).expect("should build");
         // Two predecessors with same key each produce their own edge.

@@ -1,0 +1,68 @@
+{
+  "nodes": [
+    {
+      "id": "get_todo",
+      "providers": [{
+        "type": "http",
+        "url": "https://jsonplaceholder.typicode.com/todos/1",
+        "method": "GET"
+      }],
+      "process_timeout_secs": 15
+    },
+    {
+      "id": "get_post",
+      "providers": [{
+        "type": "http",
+        "url": "https://jsonplaceholder.typicode.com/posts/1",
+        "method": "GET"
+      }],
+      "process_timeout_secs": 15
+    },
+    {
+      "id": "post_create",
+      "providers": [{
+        "type": "http",
+        "url": "https://jsonplaceholder.typicode.com/posts",
+        "method": "POST",
+        "body": "{\"title\":\"nexus-http-test\",\"body\":\"hello from nexus http provider\",\"userId\":1}"
+      }],
+      "process_timeout_secs": 15
+    },
+    {
+      "id": "error_404",
+      "providers": [{
+        "type": "http",
+        "url": "https://jsonplaceholder.typicode.com/nonexistent",
+        "method": "GET"
+      }],
+      "process_timeout_secs": 15
+    },
+    {
+      "id": "on_success",
+      "providers": [{
+        "type": "shell",
+        "command": "python -c \"import json,sys; data=sys.stdin.read(); ctx=json.loads(data); ok=[k for k,v in ctx['inputs'].items() if v]; print(json.dumps({'route':'done','content':f'HTTP GET/POST 成功: {len(ok)} 个请求'}))\""
+      }],
+      "process_timeout_secs": 8
+    },
+    {
+      "id": "on_error",
+      "providers": [{
+        "type": "shell",
+        "command": "python -c \"import json; print(json.dumps({'route':'done','content':'HTTP 404 错误被 Failed 边正确捕获'}))\""
+      }],
+      "process_timeout_secs": 5
+    }
+  ],
+  "edges": [
+    {"from": "get_todo",   "to": "on_success", "trigger": "all", "event": "complete"},
+    {"from": "get_post",   "to": "on_success", "trigger": "all", "event": "complete"},
+    {"from": "post_create","to": "on_success", "trigger": "all", "event": "complete"},
+    {"from": "error_404",  "to": "on_error",   "trigger": "any", "event": "failed"}
+  ],
+  "dataflows": [
+    { "from": "get_todo",   "to": "on_success" },
+    { "from": "get_post",   "to": "on_success" },
+    { "from": "post_create","to": "on_success" }
+  ]
+}

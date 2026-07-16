@@ -21,9 +21,9 @@ use crate::nodeshell::NodeOutput;
 pub struct DataRouter {
     /// Maps each node index to its stored output (route + content).
     outputs: HashMap<NodeIndex, NodeOutput>,
-    /// Pre-built index: target node → [(alias, source_node_index)]
+    /// Pre-built index: target node → [(alias, `source_node_index`)]
     flow_index: HashMap<NodeIndex, Vec<(String, NodeIndex)>>,
-    /// Reverse mapping: NodeIndex → string node ID (for diagnostics).
+    /// Reverse mapping: `NodeIndex` → string node ID (for diagnostics).
     index_to_id: HashMap<NodeIndex, String>,
 }
 
@@ -32,7 +32,7 @@ impl DataRouter {
     /// data flow definitions.
     ///
     /// Builds a pre-computed `flow_index` from the `dataflows[]` declarations
-    /// so that `build_input` runs in O(inputs_of_target) time.
+    /// so that `build_input` runs in `O(inputs_of_target)` time.
     #[must_use]
     pub fn new(
         node_id_to_index: HashMap<String, NodeIndex>,
@@ -91,8 +91,7 @@ impl DataRouter {
                         let source_id = self
                             .index_to_id
                             .get(source)
-                            .map(|s| s.as_str())
-                            .unwrap_or("unknown");
+                            .map_or("unknown", std::string::String::as_str);
                         tracing::info!(
                             target: "nexus::diagnostic",
                             "[Engine.DataRouter] Task node:{} no msg.",
@@ -108,7 +107,7 @@ impl DataRouter {
 
     /// Build an upstream output map for the target node.
     ///
-    /// Returns a map of alias → full NodeOutput (route + content).
+    /// Returns a map of alias → full `NodeOutput` (route + content).
     /// Used by the template engine to resolve `{{datarouter.<alias>.route}}`
     /// and `{{datarouter.<alias>.content}}` references.
     /// Sources with no stored output yield `{route: "", content: ""}`.

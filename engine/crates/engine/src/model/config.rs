@@ -2,16 +2,16 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-fn default_node_timeout() -> u64 {
+const fn default_node_timeout() -> u64 {
     3600
 }
 
-fn default_max_timeout_retries() -> u64 {
+const fn default_max_timeout_retries() -> u64 {
     3
 }
 
 /// Runtime engine configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineConfig {
     /// Maximum number of nodes that can run concurrently.
     /// If None, defaults to CPU core count at runtime.
@@ -41,7 +41,8 @@ impl Default for EngineConfig {
 
 impl EngineConfig {
     /// Create a new `EngineConfig` with explicit values.
-    pub fn new(
+    #[must_use]
+    pub const fn new(
         max_concurrency: Option<usize>,
         default_node_timeout_secs: u64,
         max_timeout_retries: u64,
@@ -54,13 +55,15 @@ impl EngineConfig {
     }
 
     /// Get the default node timeout as a [`Duration`].
-    pub fn node_timeout(&self) -> Duration {
+    #[must_use]
+    pub const fn node_timeout(&self) -> Duration {
         Duration::from_secs(self.default_node_timeout_secs)
     }
 
     /// Get the effective max concurrency, using system CPU count if not set.
+    #[must_use]
     pub fn effective_max_concurrency(&self) -> usize {
         self.max_concurrency
-            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, std::num::NonZero::get))
     }
 }

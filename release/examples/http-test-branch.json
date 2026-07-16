@@ -1,0 +1,42 @@
+{
+  "nodes": [
+    {
+      "id": "call_200",
+      "providers": [{
+        "type": "http",
+        "url": "https://jsonplaceholder.typicode.com/todos/1",
+        "method": "GET"
+      }],
+      "process_timeout_secs": 15
+    },
+    {
+      "id": "call_404",
+      "providers": [{
+        "type": "http",
+        "url": "https://jsonplaceholder.typicode.com/nonexistent",
+        "method": "GET"
+      }],
+      "process_timeout_secs": 15
+    },
+    {
+      "id": "on_success",
+      "providers": [{
+        "type": "subprocess",
+        "command": "python -c \"import json; print(json.dumps({'route':'done','content':'GET 200: success branch!'}))\""
+      }],
+      "process_timeout_secs": 5
+    },
+    {
+      "id": "on_failure",
+      "providers": [{
+        "type": "subprocess",
+        "command": "python -c \"import json; print(json.dumps({'route':'done','content':'GET 404 -> Failed event -> error handler!'}))\""
+      }],
+      "process_timeout_secs": 5
+    }
+  ],
+  "edges": [
+    { "from": "call_200",  "to": "on_success", "trigger": "any", "event": "complete" },
+    { "from": "call_404",  "to": "on_failure", "trigger": "any", "event": "failed" }
+  ]
+}

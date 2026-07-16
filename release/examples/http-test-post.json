@@ -1,0 +1,28 @@
+{
+  "nodes": [
+    {
+      "id": "http_post",
+      "providers": [{
+        "type": "http",
+        "url": "https://jsonplaceholder.typicode.com/posts",
+        "method": "POST",
+        "body": "{\"title\":\"nexus-http-test\",\"body\":\"hello from nexus http provider\",\"userId\":1}"
+      }],
+      "process_timeout_secs": 15
+    },
+    {
+      "id": "verify",
+      "providers": [{
+        "type": "shell",
+        "command": "python -c \"import json,sys; data=sys.stdin.read(); ctx=json.loads(data); resp=ctx['inputs'].get('http_post','{}'); has_id = 'id' in resp; print(json.dumps({'route':'ok' if has_id else 'err','content':'POST OK, id present' if has_id else 'POST FAILED'}))\""
+      }],
+      "process_timeout_secs": 5
+    }
+  ],
+  "edges": [
+    { "from": "http_post", "to": "verify", "trigger": "any", "event": "complete" }
+  ],
+  "dataflows": [
+    { "from": "http_post", "to": "verify" }
+  ]
+}

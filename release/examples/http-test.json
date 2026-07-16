@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "http_get",
+      "providers": [{
+        "type": "http",
+        "url": "https://jsonplaceholder.typicode.com/todos/1",
+        "method": "GET"
+      }],
+      "process_timeout_secs": 15
+    },
+    {
+      "id": "log_result",
+      "providers": [{
+        "type": "subprocess",
+        "command": "python -c \"import json,sys; data=sys.stdin.read(); ctx=json.loads(data); resp=ctx['inputs'].get('http_get','{}'); print(json.dumps({'route':'ok','content':f'HTTP GET success! response {len(resp)} bytes'}))\""
+      }],
+      "process_timeout_secs": 5
+    }
+  ],
+  "edges": [
+    { "from": "http_get", "to": "log_result", "trigger": "any", "event": "complete" }
+  ],
+  "dataflows": [
+    { "from": "http_get", "to": "log_result" }
+  ]
+}

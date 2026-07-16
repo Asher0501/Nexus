@@ -453,3 +453,88 @@ async fn chain_f_graph_structure_verification() {
     assert_eq!(dataflows[0]["from"], "ingest");
     assert_eq!(dataflows[0]["to"], "validate");
 }
+
+// ---------------------------------------------------------------------------
+// Chain G: Streaming node → verify chunks appear in run log file
+//
+// This test validates the full pipeline: shell node stderr → engine
+// NodeChunk capture → log file persistence.  A python one-liner writes
+// 5 lines to stderr with a small delay between each, simulating real
+// streaming output (the same mechanism llm_node.py uses to forward
+// stream-json events from CLI tools).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn chain_g_streaming_chunks_in_log_file() {
+    let (_base_url, _store, _room) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // Workflow: single shell node that writes timed lines to stderr,
+    // then outputs valid JSON to stdout.
+    let definition = serde_json::json!({
+        "nodes": [{
+            "id": "streamer",
+            "providers": [{
+                "type": "shell",
+                "command": "python -c \"import sys,time; [sys.stderr.write(f'chunk_{i}\\n') or sys.stderr.flush() or time.sleep(0.05) for i in range(5)]; print('{\\\"route\\\":\\\"ok\\\",\\\"content\\\":\\\"done\\\"}')\""
+            }],
+            "process_timeout_secs": 10
+        }],
+        "edges": []
+    });
+
+    // Create workflow via API
+    let body = serde_json::json!({
+        "name": "chain-g-streaming",
+        "definition": definition,
+    });
+    let resp = client
+        .post(format!("{_base_url}/api/workflows"))
+        .json(&body)
+        .send()
+        .await
+        .expect("create workflow");
+    assert_eq!(resp.status(), 200);
+
+    let val: serde_json::Value = resp.json().await.expect("parse response");
+    let wf_id = val["id"].as_str().expect("id").to_string();
+
+    // Trigger run
+    let resp = client
+        .post(format!("{_base_url}/api/workflows/{wf_id}/run"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("trigger run");
+    assert_eq!(resp.status(), 202);
+    let run_val: serde_json::Value = resp.json().await.expect("parse run");
+    let run_id = run_val["run_id"].as_str().expect("run_id").to_string();
+
+    // Wait for run to complete (shell node with 10s timeout, short execution)
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    // Read the run log file
+    let log_path = format!("log/run-{run_id}.log");
+    let log_content = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|_| panic!("log file should exist at {log_path}"));
+
+    // Verify chunks: each stderr line becomes a [node_id] prefixed line
+    let chunk_lines: Vec<&str> = log_content
+        .lines()
+        .filter(|l| l.starts_with("[streamer]"))
+        .collect();
+
+    assert!(
+        chunk_lines.len() >= 3,
+        "expected at least 3 chunk lines in log, got {}: {log_content}",
+        chunk_lines.len()
+    );
+
+    // Verify chunk content: should contain our numbered lines
+    let has_chunk_0 = chunk_lines.iter().any(|l| l.contains("chunk_0"));
+    let has_chunk_4 = chunk_lines.iter().any(|l| l.contains("chunk_4"));
+    assert!(has_chunk_0, "log should contain chunk_0, got: {chunk_lines:?}");
+    assert!(has_chunk_4, "log should contain chunk_4, got: {chunk_lines:?}");
+
+    // Clean up log
+    let _ = std::fs::remove_file(&log_path);
+}

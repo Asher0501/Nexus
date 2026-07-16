@@ -83,7 +83,7 @@ async fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(48080);
 
-    let addr = SocketAddr::from((host.parse::<std::net::Ipv4Addr>().unwrap_or(std::net::Ipv4Addr::new(127, 0, 0, 1)), port));
+    let addr = SocketAddr::from((host.parse::<std::net::Ipv4Addr>().unwrap_or(std::net::Ipv4Addr::LOCALHOST), port));
     tracing::info!("[Dashboard.Server] listening on {addr}");
     tracing::info!("[Dashboard.Server] REST API: /api/workflows, /api/runs");
     tracing::info!("[Dashboard.Server] WebSocket: /ws/runs/:run_id");

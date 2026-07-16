@@ -38,12 +38,18 @@ pub async fn create(
             Value::String(s) => s.clone(),
             other => serde_json::to_string(other).unwrap_or_else(|_| "{}".into()),
         })
+        .or_else(|| {
+            // Auto-wrap: if body is a raw workflow JSON (has "nodes"),
+            // treat the entire body as the definition.
+            body.get("nodes")
+                .and(serde_json::to_string(&body).ok())
+        })
         .unwrap_or_else(|| "{}".into());
 
     let store = store.clone();
     let id_clone = id.clone();
     match tokio::task::spawn_blocking(move || store.create_workflow(&id_clone, &name, &definition)).await {
-        Ok(Ok(_)) => Json(json!({"id": id, "status": "created"})),
+        Ok(Ok(())) => Json(json!({"id": id, "status": "created"})),
         Ok(Err(e)) => {
             tracing::error!("[Workflows] create failed: {e}");
             Json(json!({"error": e.to_string()}))
@@ -97,14 +103,20 @@ pub async fn update(
             Value::String(s) => s.clone(),
             other => serde_json::to_string(other).unwrap_or_else(|_| "{}".into()),
         })
+        .or_else(|| {
+            // Auto-wrap: if body is a raw workflow JSON (has "nodes"),
+            // treat the entire body as the definition.
+            body.get("nodes")
+                .and(serde_json::to_string(&body).ok())
+        })
         .unwrap_or_else(|| "{}".into());
 
     let store = store.clone();
     let id_clone = id.clone();
     let name = name.to_string();
-    let definition = definition.to_string();
+    let definition = definition.clone();
     match tokio::task::spawn_blocking(move || store.update_workflow(&id_clone, &name, &definition)).await {
-        Ok(Ok(_)) => Json(json!({"id": id, "status": "updated"})),
+        Ok(Ok(())) => Json(json!({"id": id, "status": "updated"})),
         Ok(Err(e)) => {
             tracing::error!("[Workflows] update failed: {e}");
             Json(json!({"error": e.to_string()}))
@@ -124,7 +136,7 @@ pub async fn delete(
     let store = store.clone();
     let id_clone = id.clone();
     match tokio::task::spawn_blocking(move || store.delete_workflow(&id_clone)).await {
-        Ok(Ok(_)) => Json(json!({"id": id, "status": "deleted"})),
+        Ok(Ok(())) => Json(json!({"id": id, "status": "deleted"})),
         Ok(Err(e)) => {
             tracing::error!("[Workflows] delete failed: {e}");
             Json(json!({"error": e.to_string()}))
@@ -187,20 +199,26 @@ pub async fn graph(
                 .map(|arr| {
                     arr.iter()
                         .map(|e| {
-                            let label = format!(
+                            let _label = format!(
                                 "{}{}",
                                 e.get("event").and_then(|v| v.as_str()).unwrap_or("complete"),
                                 e.get("exit_reason")
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.is_empty())
-                                    .map(|r| format!("/{}", r))
+                                    .map(|r| format!("/{r}"))
                                     .unwrap_or_default()
                             );
+                            let trigger = e.get("trigger").and_then(|v| v.as_str()).unwrap_or("all");
+                            let event = e.get("event").and_then(|v| v.as_str()).unwrap_or("complete");
+                            let er = e.get("exit_reason").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                            let label = format!("{trigger}/{event}{}", er.map(|r| format!("/{r}")).unwrap_or_default());
                             json!({
                                 "from": e.get("from"),
                                 "to": e.get("to"),
+                                "trigger": trigger,
                                 "event": e.get("event"),
                                 "exit_reason": e.get("exit_reason"),
+                                "threshold": e.get("threshold").and_then(serde_json::Value::as_u64).unwrap_or(1),
                                 "label": label,
                             })
                         })
@@ -211,8 +229,7 @@ pub async fn graph(
         .unwrap_or_default();
 
     let dataflows = parsed
-        .get("dataflows")
-        .map(|dfs| dfs.clone())
+        .get("dataflows").cloned()
         .unwrap_or(json!([]));
 
     Json(json!({

@@ -2,7 +2,7 @@
 //!
 //! Usage: nexus run <workflow.json> [OPTIONS]
 //!
-//! This binary needs unsafe code for Windows console API (SetConsoleMode).
+//! This binary needs unsafe code for Windows console API (`SetConsoleMode`).
 #![cfg_attr(windows, allow(unsafe_code))]
 
 // dev-dependency anchor for unused_crate_dependencies lint.
@@ -75,7 +75,7 @@ async fn main() {
             );
             if handle != winapi::um::handleapi::INVALID_HANDLE_VALUE {
                 let mut mode: u32 = 0;
-                if winapi::um::consoleapi::GetConsoleMode(handle, &mut mode) != 0 {
+                if winapi::um::consoleapi::GetConsoleMode(handle, &raw mut mode) != 0 {
                     let _ = winapi::um::consoleapi::SetConsoleMode(
                         handle,
                         mode | winapi::um::wincon::ENABLE_VIRTUAL_TERMINAL_PROCESSING,
@@ -133,7 +133,7 @@ async fn main() {
             let def: WorkflowDef = match serde_json::from_str(&content) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("Error parsing workflow JSON: {}", e);
+                    eprintln!("Error parsing workflow JSON: {e}");
                     std::process::exit(1);
                 }
             };
@@ -141,12 +141,15 @@ async fn main() {
             // Validate
             if let Err(errors) = validate(&def) {
                 for err in &errors {
-                    eprintln!("Validation error: {}", err);
-                }
-                if validate_only {
-                    std::process::exit(1);
+                    eprintln!("Validation error: {err}");
                 }
                 std::process::exit(1);
+            }
+
+            // Advisory warnings — non-blocking, but flag common pitfalls.
+            let warnings = nexus_engine::graph::validate_warnings(&def);
+            for w in &warnings {
+                eprintln!("Warning: {w}");
             }
 
             if validate_only {
@@ -207,7 +210,7 @@ async fn main() {
                 Ok(e) => e,
                 Err(errors) => {
                     for err in &errors {
-                        eprintln!("Build error: {}", err);
+                        eprintln!("Build error: {err}");
                     }
                     std::process::exit(1);
                 }
@@ -224,7 +227,7 @@ async fn main() {
                     std::process::exit(0);
                 }
                 Err(e) => {
-                    eprintln!("Runtime error: {:?}", e);
+                    eprintln!("Runtime error: {e:?}");
                     std::process::exit(2);
                 }
             }

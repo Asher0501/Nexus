@@ -10,11 +10,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"
 assert-json-diff = "2"
 tokio = { workspace = true, features = ["test-util"] }
+ureq = { version = "3", features = ["json"] }
 
 [lints]
 workspace = true

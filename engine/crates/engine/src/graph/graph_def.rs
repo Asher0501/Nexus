@@ -33,6 +33,8 @@ pub struct NodeData {
     pub route_policy: Option<RoutePolicyDef>,
     /// Per-node max retries on failure (None = inherit global default).
     pub max_retries: Option<u64>,
+    /// Node-level scripts directory. Overrides workflow-level and global defaults.
+    pub scripts_dir: Option<String>,
 }
 
 /// Execution parameters for a node.
@@ -42,9 +44,9 @@ pub struct NodeParams {
     pub process_timeout_secs: u64,
 }
 
-/// Local transfer function f_v for a single node.
+/// Local transfer function `f_v` for a single node.
 ///
-/// Corresponds to the local closure theorem's f_v: State_v → 2^V.
+/// Corresponds to the local closure theorem's `f_v`: `State_v` → 2^V.
 /// Each node has exactly one `NodeTransfer`, aggregating all outgoing edges.
 ///
 /// The [`evaluate`](NodeTransfer::evaluate) method makes the transfer function
@@ -58,13 +60,13 @@ pub struct NodeTransfer {
 }
 
 impl NodeTransfer {
-    /// Evaluate f_v: State_v → 2^V.
+    /// Evaluate `f_v`: `State_v` → 2^V.
     ///
     /// Implements the local closure theorem's transfer function for this node.
-    /// For each outgoing edge e = (v, w, h_e, g_e) where v is `self.from`:
+    /// For each outgoing edge e = (v, w, `h_e`, `g_e`) where v is `self.from`:
     ///
-    /// 1. **h_e** — branch matching: event type match, exit_reason filter, threshold counter
-    /// 2. **g_e** — strategy aggregation: `Any` enqueues immediately; `All` waits for
+    /// 1. **`h_e`** — branch matching: event type match, `exit_reason` filter, threshold counter
+    /// 2. **`g_e`** — strategy aggregation: `Any` enqueues immediately; `All` waits for
     ///    all upstream nodes via `fan_in_pending`, then resets for the next round
     ///
     /// This is a **pure function** with respect to node state — it reads `edges` and
@@ -122,15 +124,13 @@ impl NodeTransfer {
                     ready.push(edge.to);
                 }
                 Strategy::All => {
-                    if let Some(pending) = fan_in_pending.get_mut(&edge.to) {
-                        if *pending > 0 {
+                    if let Some(pending) = fan_in_pending.get_mut(&edge.to)
+                        && *pending > 0 {
                             *pending -= 1;
                         }
-                    }
                     let all_ready = fan_in_pending
                         .get(&edge.to)
-                        .map(|&p| p == 0)
-                        .unwrap_or(true);
+                        .is_none_or(|&p| p == 0);
                     if all_ready {
                         ready_queue.push_back(edge.to);
                         ready.push(edge.to);
@@ -164,7 +164,7 @@ pub struct GraphDef {
     index: HashMap<String, NodeIndex>,
     /// All edge definitions in the graph.
     edges: Vec<EdgeDef>,
-    /// Local transfer functions for each node (f_v).
+    /// Local transfer functions for each node (`f_v`).
     transfers: HashMap<NodeIndex, NodeTransfer>,
     /// Execution parameters for each node.
     params: HashMap<NodeIndex, NodeParams>,
@@ -290,7 +290,7 @@ impl GraphDef {
 
     /// Get the number of edges in the graph.
     #[must_use]
-    pub fn edge_count(&self) -> usize {
+    pub const fn edge_count(&self) -> usize {
         self.edges.len()
     }
 
@@ -312,9 +312,9 @@ impl GraphDef {
         &self.edges
     }
 
-    /// Get all node transfers (f_v).
+    /// Get all node transfers (`f_v`).
     #[must_use]
-    pub fn transfers(&self) -> &HashMap<NodeIndex, NodeTransfer> {
+    pub const fn transfers(&self) -> &HashMap<NodeIndex, NodeTransfer> {
         &self.transfers
     }
 
@@ -360,13 +360,13 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None
         });
         let mut index = HashMap::new();
         index.insert("A".into(), a);
@@ -428,7 +428,7 @@ mod tests {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None
         });
         let mut p2 = p.clone();
         p2.insert(node_c, NodeParams {

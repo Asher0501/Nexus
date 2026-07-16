@@ -140,11 +140,27 @@ echo '{"jsonrpc":"2.0","method":"validate_workflow","params":{"workflow_json":"{
 
 使用 `type: "llm"` 可将任意 LLM CLI 作为工作流节点。引擎通过 `scripts/llm_node.py` 自动处理跨平台 CLI 发现、输出解析和路由。
 
-> **依赖**：LLM 节点需要系统安装 Python 3 + Claude Code CLI。
+使用 `type: "llm_sdk"` 可通过 Anthropic Python SDK 直调，无需 CLI。配置 `model`、`prompt`、`routes` 字段即可：
 
+```json
+{
+  "nodes": [{
+    "id": "ask",
+    "providers": [{
+      "type": "llm_sdk",
+      "model": "claude-sonnet-5-20251001",
+      "prompt": "Say hello. Output ONLY: {\"route\":\"ok\",\"content\":\"Hello!\"}",
+      "routes": ["ok"],
+      "max_tokens": 256
+    }],
+    "process_timeout_secs": 60
+  }],
+  "edges": []
+}
+```
 ## 示范工作流
 
-Dashboard 内置了三个可从 `static/` 导入的示范工作流，覆盖 Nexus 全部特性：
+以下是三个示范工作流，覆盖 Nexus 全部特性：
 
 ### c2 — Fan-out / Fan-in + 有向环
 

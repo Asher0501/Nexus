@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use super::types::{exit_codes, NodeChunk, NodeContext, NodeMetadata, NodeOutcome, NodeOutput, SpawnError};
+use super::TemplateEngine;
+use super::types::{exit_codes, NodeChunk, NodeContext, NodeOutcome, NodeOutput, SpawnError};
 
 /// Executes a node by spawning a subprocess.
 ///
@@ -22,37 +23,22 @@ use super::types::{exit_codes, NodeChunk, NodeContext, NodeMetadata, NodeOutcome
 /// `route` field, execution fails with [`SpawnError`].
 #[derive(Debug, Clone)]
 pub struct SubprocessExecutor {
-    /// The command to execute.
     command: String,
-    /// Whether this is a shell-wrapped command.
-    /// Shell commands are passed directly to `cmd.exe /c` / `sh -c`
-    /// without splitting, preserving quotes and shell syntax.
     shell: bool,
+    scripts_dir: PathBuf,
 }
 
 impl SubprocessExecutor {
-    /// Create a new subprocess executor for the given command string.
+    /// Create a new subprocess executor.
     #[must_use]
-    pub fn new(command: String) -> Self {
-        Self { command, shell: false }
+    pub const fn new(command: String, scripts_dir: PathBuf) -> Self {
+        Self { command, shell: false, scripts_dir }
     }
 
     /// Create a shell-wrapped executor.
-    ///
-    /// The command is executed via `cmd /c` (Windows) or `sh -c` (Unix)
-    /// without argument splitting, enabling pipes, redirects, shell quoting,
-    /// and multi-word quoted arguments.
-    ///
-    /// # Security
-    ///
-    /// This function performs basic single-quote escaping on Unix. It does
-    /// NOT sanitise all shell metacharacters (backticks, `$()`, `&&`, etc.).
-    /// Do NOT pass untrusted input directly to the `command` parameter. If
-    /// the command includes user-supplied values, use the `Subprocess`
-    /// provider with explicit argument arrays instead.
     #[must_use]
-    pub fn new_shell(command: String) -> Self {
-        Self { command, shell: true }
+    pub const fn new_shell(command: String, scripts_dir: PathBuf) -> Self {
+        Self { command, shell: true, scripts_dir }
     }
 
     /// Split the command string into program and arguments.
@@ -71,9 +57,9 @@ impl SubprocessExecutor {
         let mut tokens: Vec<String> = Vec::new();
         let mut current = String::new();
         let mut in_quotes = false;
-        let mut chars = trimmed.chars().peekable();
+        let chars = trimmed.chars();
 
-        while let Some(ch) = chars.next() {
+        for ch in chars {
             match ch {
                 '"' if !in_quotes => {
                     in_quotes = true;
@@ -112,155 +98,13 @@ impl SubprocessExecutor {
 
     /// Render `{{metadata.*}}` and `{{datarouter.*.*}}` placeholders
     /// in a prompt or command template.
-    /// Escape a value for use in a shell command.
-    /// Windows cmd: wrap in quotes, escape internal `"` → `""` and `%` → `%%`.
-    /// Unix sh: wrap in single quotes, escape internal `'` → `'\''`.
-    fn shell_escape(value: &str) -> String {
-        if cfg!(windows) {
-            let escaped = value.replace('"', "\"\"")
-                             .replace('%', "%%");
-            format!("\"{}\"", escaped)
-        } else {
-            let escaped = value.replace('\'', "'\\''");
-            format!("'{}'", escaped)
-        }
-    }
-
-    fn render_template(
-        template: &str,
-        metadata: &NodeMetadata,
-        upstream: &HashMap<String, NodeOutput>,
-    ) -> String {
-        Self::render_template_impl(template, metadata, upstream, false)
-    }
-
-    fn render_template_shell(
-        template: &str,
-        metadata: &NodeMetadata,
-        upstream: &HashMap<String, NodeOutput>,
-    ) -> String {
-        Self::render_template_impl(template, metadata, upstream, true)
-    }
-
-    fn render_template_impl(
-        template: &str,
-        metadata: &NodeMetadata,
-        upstream: &HashMap<String, NodeOutput>,
-        shell: bool,
-    ) -> String {
-        let mut result = String::with_capacity(template.len());
-        let mut rest = template;
-
-        while let Some(start) = rest.find("{{") {
-            result.push_str(&rest[..start]);
-            let after = &rest[start + 2..];
-            let end = after.find("}}").unwrap_or(0);
-            if end == 0 {
-                result.push_str(&rest[start..]);
-                rest = "";
-                break;
-            }
-            let key_path = &after[..end];
-            let consumed = start + 2 + end + 2;
-
-            if let Some(meta_key) = key_path.strip_prefix("metadata.") {
-                let value = match meta_key {
-                    "run_count" => metadata.run_count.to_string(),
-                    "timed_out" => metadata.timed_out.to_string(),
-                    field => {
-                        tracing::warn!(
-                            "unknown metadata field '{}' — valid: run_count, timed_out",
-                            field,
-                        );
-                        result.push_str(&rest[start..start + 4 + end]);
-                        rest = &rest[consumed..];
-                        continue;
-                    }
-                };
-                if shell {
-                    result.push_str(&Self::shell_escape(&value));
-                } else {
-                    result.push_str(&value);
-                }
-            } else if let Some(dr_path) = key_path.strip_prefix("datarouter.") {
-                if let Some(dot) = dr_path.find('.') {
-                    let alias = &dr_path[..dot];
-                    let field = &dr_path[dot + 1..];
-                    let fallback = NodeOutput { route: String::new(), content: String::new() };
-                    let output = upstream.get(alias).unwrap_or(&fallback);
-                    let value = match field {
-                        "route" => output.route.clone(),
-                        "content" => output.content.clone(),
-                        field => {
-                            tracing::warn!(
-                                "unknown datarouter field '{}' for source '{}' — valid: route, content",
-                                field, alias,
-                            );
-                            result.push_str(&rest[start..start + 4 + end]);
-                            rest = &rest[consumed..];
-                            continue;
-                        }
-                    };
-                    if shell {
-                        result.push_str(&Self::shell_escape(&value));
-                    } else {
-                        result.push_str(&value);
-                    }
-                } else {
-                    result.push_str(&rest[start..start + 4 + end]);
-                }
-            } else if key_path.contains('.') {
-                tracing::warn!(
-                    "unrecognized template '{}' — engine only supports metadata.* and datarouter.*.*",
-                    key_path,
-                );
-                result.push_str(&rest[start..start + 4 + end]);
-            } else {
-                result.push_str(&rest[start..start + 4 + end]);
-            }
-            rest = &rest[consumed..];
-        }
-
-        result.push_str(rest);
-        result
-    }
-
-    /// Search upward from the executable's directory for a `scripts/`
-    /// directory, up to `max_levels` parent levels.
-    fn find_scripts_dir(max_levels: usize) -> Option<std::path::PathBuf> {
-        let exe = std::env::current_exe().ok()?;
-        let mut dir = exe.parent()?.to_path_buf();
-        for _ in 0..=max_levels {
-            let scripts = dir.join("scripts");
-            if scripts.exists() {
-                return Some(scripts);
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-        None
-    }
-
-    /// Resolve `scripts/` paths to absolute paths relative to the executable.
-    ///
-    /// Searches upward from the exe directory for a `scripts/` directory,
-    /// supporting both `bin/nexus-cli.exe` (Windows) and `bin/linux/nexus-cli`
-    /// (Linux) release layouts.  When the command contains `scripts/xxx`, we
-    /// resolve it to `{release_root}/scripts/xxx` so the workflow author does
-    /// not need to know (or `cd` into) the release directory.
-    fn resolve_scripts_path(command: &str) -> String {
+    /// Resolve `scripts/` paths in the command to the configured scripts dir.
+    fn resolve_scripts_path(&self, command: &str) -> String {
         if !command.contains("scripts/") {
             return command.to_string();
         }
-
-        if let Some(scripts_dir) = Self::find_scripts_dir(3) {
-            let abs = scripts_dir.to_string_lossy().replace('\\', "/");
-            return command.replace("scripts/", &format!("{abs}/"));
-        }
-
-        // Fallback: leave as-is (CWD-relative, backward compatible).
-        command.to_string()
+        let abs = self.scripts_dir.to_string_lossy().replace('\\', "/");
+        command.replace("scripts/", &format!("{abs}/"))
     }
 
     /// Run the subprocess, collect stdout as JSON, and return the parsed outcome.
@@ -284,28 +128,28 @@ impl SubprocessExecutor {
     /// not valid JSON with a `route` field.
     pub async fn run(
         &self,
-        ctx: NodeContext,
+        mut ctx: NodeContext,
         timeout: Duration,
         node_id: &str,
         chunk_tx: Option<mpsc::Sender<NodeChunk>>,
     ) -> Result<NodeOutcome, SpawnError> {
+        ctx.sanitize_surrogates();
         // Render template in command string: {{metadata.*}},
         // {{datarouter.*.*}}. Shell mode: escape values to prevent command injection.
         let has_template = self.command.contains("{{metadata.")
-            || self.command.contains("{{datarouter.");
+            || self.command.contains("{{datarouter.")
+            || self.command.contains("{{node_dir}}");
         let command = if has_template {
             if self.shell {
-                Self::render_template_shell(&self.command, &ctx.metadata, &ctx.upstream)
+                TemplateEngine::render_shell(&self.command, &ctx.metadata, &ctx.upstream, &self.scripts_dir.to_string_lossy())
             } else {
-                Self::render_template(&self.command, &ctx.metadata, &ctx.upstream)
+                TemplateEngine::render(&self.command, &ctx.metadata, &ctx.upstream, &self.scripts_dir.to_string_lossy())
             }
         } else {
             self.command.clone()
         };
 
-        // Resolve `scripts/` paths relative to the executable binary so that
-        // `python scripts/xxx.py` works regardless of CWD.
-        let command = Self::resolve_scripts_path(&command);
+        let command = self.resolve_scripts_path(&command);
 
         tracing::info!(
             target: "nexus::nodeshell",
@@ -320,7 +164,7 @@ impl SubprocessExecutor {
         if let Some(ref tx) = chunk_tx {
             let label = if self.shell { "[shell_node]" } else { "[subprocess_node]" };
             let _ = tx.try_send(NodeChunk {
-                text: format!("{} {}", label, command),
+                text: format!("{label} {command}"),
             });
         }
 
@@ -338,8 +182,7 @@ impl SubprocessExecutor {
                 c.arg("/c");
                 #[cfg(windows)]
                 {
-                    use std::os::windows::process::CommandExt;
-                    c.raw_arg(&format!(" {}", command));
+                    c.raw_arg(format!(" {command}"));
                 }
                 c
             } else {
@@ -362,7 +205,8 @@ impl SubprocessExecutor {
 
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .env("PYTHONIOENCODING", "utf-8"); // stdout/stderr are UTF-8 pipes on all platforms
 
         let mut child = cmd.spawn().map_err(|e| SpawnError {
             message: e.to_string(),
@@ -390,6 +234,7 @@ impl SubprocessExecutor {
 ///
 /// If the child times out, it is killed and the partially-collected output is
 /// returned with `timed_out = true`.
+#[allow(clippy::too_many_lines)]
 async fn collect_and_wait(
     mut child: Child,
     timeout: Duration,
@@ -488,9 +333,24 @@ async fn collect_and_wait(
                 node_output
             }
             Err(e) => {
-                return Err(SpawnError {
-                    message: format!("stdout is not valid JSON with 'route' field: {e}"),
-                });
+                // If the process exited with a non-zero code, treat the
+                // unparseable stdout as a normal failure — NOT a spawn
+                // error.  SpawnError triggers retry, but a process that
+                // runs and fails (e.g. Python SyntaxError → exit 1,
+                // empty stdout) should go directly to Failed without
+                // retry.
+                if exit_code != 0 {
+                    NodeOutput {
+                        route: "failed".into(),
+                        content: format!(
+                            "process exited with code {exit_code}. stderr: {stderr}. stdout parse error: {e}"
+                        ),
+                    }
+                } else {
+                    return Err(SpawnError {
+                        message: format!("stdout is not valid JSON with 'route' field: {e}"),
+                    });
+                }
             }
         }
     };
@@ -512,14 +372,18 @@ async fn collect_and_wait(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-
+    
     use super::*;
+
+    fn test_scripts_dir() -> PathBuf {
+        PathBuf::from("scripts")
+    }
 
     /// Build a command that emits clean JSON on stdout, cross-platform.
     /// Uses hex-encoding to avoid shell quoting issues — the entire Python
-    /// code contains no spaces so split_command works correctly.
+    /// code contains no spaces so `split_command` works correctly.
     fn json_cmd(json: &str) -> String {
-        let hex: String = json.bytes().map(|b| format!("{:02x}", b)).collect();
+        let hex: String = json.bytes().map(|b| format!("{b:02x}")).collect();
         format!(
             "python -c __import__('sys').stdout.write(bytes.fromhex('{hex}').decode())"
         )
@@ -528,18 +392,18 @@ mod tests {
     #[tokio::test]
     async fn test_echo_subprocess() {
         let cmd = if cfg!(windows) { "cmd.exe /c echo hello" } else { "echo hello" };
-        let executor = SubprocessExecutor::new(cmd.to_string());
+        let executor = SubprocessExecutor::new(cmd.to_string(), test_scripts_dir());
         let mut ctx = NodeContext::default();
         ctx.inputs = HashMap::new();
         let outcome = executor.run(ctx, Duration::from_secs(5), "echo", None).await;
         // echo outputs plain text - JSON parse should fail.
-        assert!(outcome.is_err(), "echo without JSON should fail: {:?}", outcome);
+        assert!(outcome.is_err(), "echo without JSON should fail: {outcome:?}");
     }
 
     #[tokio::test]
     async fn test_json_output_parsed() {
         let json = r#"{"route":"result","content":"hello world"}"#;
-        let executor = SubprocessExecutor::new(json_cmd(json));
+        let executor = SubprocessExecutor::new(json_cmd(json), test_scripts_dir());
         let mut ctx = NodeContext::default();
         ctx.inputs = HashMap::new();
         let outcome = executor.run(ctx, Duration::from_secs(5), "json_test", None).await
@@ -553,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn test_json_output_without_route_fails() {
         let json = r#"{"content":"no route here"}"#;
-        let executor = SubprocessExecutor::new(json_cmd(json));
+        let executor = SubprocessExecutor::new(json_cmd(json), test_scripts_dir());
         let mut ctx = NodeContext::default();
         ctx.inputs = HashMap::new();
         let result = executor.run(ctx, Duration::from_secs(5), "no_route", None).await;
@@ -565,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn test_plain_text_output_fails() {
         let cmd = if cfg!(windows) { "cmd.exe /c echo just plain text" } else { "echo just plain text" };
-        let executor = SubprocessExecutor::new(cmd.to_string());
+        let executor = SubprocessExecutor::new(cmd.to_string(), test_scripts_dir());
         let mut ctx = NodeContext::default();
         ctx.inputs = HashMap::new();
         let result = executor.run(ctx, Duration::from_secs(5), "plain_text", None).await;
@@ -575,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn test_json_output_with_content_only() {
         let json = r#"{"route":"event"}"#;
-        let executor = SubprocessExecutor::new(json_cmd(json));
+        let executor = SubprocessExecutor::new(json_cmd(json), test_scripts_dir());
         let mut ctx = NodeContext::default();
         ctx.inputs = HashMap::new();
         let outcome = executor.run(ctx, Duration::from_secs(5), "content_only", None).await
@@ -586,24 +450,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout_returns_partial_output() {
-        let executor = SubprocessExecutor::new("ping -n 60 127.0.0.1".into());
+        let executor = SubprocessExecutor::new("ping -n 60 127.0.0.1".into(), test_scripts_dir());
         let mut ctx = NodeContext::default();
         ctx.inputs = HashMap::new();
         let result = executor.run(ctx, Duration::from_millis(10), "timeout_test", None).await;
-        match result {
-            Ok(outcome) => {
+        if let Ok(outcome) = result {
         assert!(outcome.timed_out(), "should timeout with 10ms timeout");
         assert!(outcome.exit_code != 0 || outcome.timed_out());
-            }
-            Err(_) => {
-                // Spawn might fail on some systems -- that's ok
-            }
+            } else {
+            // Spawn might fail on some systems -- that's ok
         }
     }
 
     #[tokio::test]
     async fn test_spawn_failure() {
-        let executor = SubprocessExecutor::new("nonexistent_command_12345".into());
+        let executor = SubprocessExecutor::new("nonexistent_command_12345".into(), test_scripts_dir());
         let mut ctx = NodeContext::default();
         ctx.inputs = HashMap::new();
         let result = executor.run(ctx, Duration::from_secs(1), "spawn_fail", None).await;
@@ -612,58 +473,76 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_command() {
-        let executor = SubprocessExecutor::new(String::new());
+        let executor = SubprocessExecutor::new(String::new(), test_scripts_dir());
         let mut ctx = NodeContext::default();
         ctx.inputs = HashMap::new();
         let result = executor.run(ctx, Duration::from_secs(1), "empty_cmd", None).await;
         assert!(result.is_err(), "empty command should return SpawnError");
     }
 
-    fn test_metadata() -> NodeMetadata {
-        NodeMetadata { run_count: 1, timed_out: false }
-    }
-
-    fn empty_upstream() -> HashMap<String, NodeOutput> {
-        HashMap::new()
-    }
-
+    /// Non-zero exit + empty stdout → Failed outcome, NOT `SpawnError`.
+    /// Regression test: before the fix, this returned `SpawnError` and the
+    /// engine would retry the node up to 3 times.  Now it returns a normal
+    /// Failed outcome so the engine transitions directly to Failed without
+    /// retry.
     #[tokio::test]
-    async fn test_render_template_no_template() {
-        let result = SubprocessExecutor::render_template(
-            "echo hello", &test_metadata(), &empty_upstream(),
-        );
-        assert_eq!(result, "echo hello", "plain text should not change");
+    async fn test_nonzero_exit_empty_stdout_is_failed_not_spawn_error() {
+        // Python exits with code 1 and produces NO stdout — simulates
+        // a SyntaxError or runtime crash.
+        let cmd = if cfg!(windows) {
+            "python -c \"import sys; sys.exit(1)\"".into()
+        } else {
+            "python3 -c 'import sys; sys.exit(1)'".into()
+        };
+        let executor = SubprocessExecutor::new(cmd, test_scripts_dir());
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
+        let result = executor
+            .run(ctx, Duration::from_secs(5), "nonzero_exit", None)
+            .await;
+        // Should be Ok (not SpawnError) — the process ran and failed.
+        match result {
+            Ok(outcome) => {
+                assert_eq!(outcome.exit_code, 1, "should preserve exit code 1");
+                assert_eq!(
+                    outcome.output.route, "failed",
+                    "should default route to 'failed'"
+                );
+                assert!(
+                    outcome.output.content.contains("exited with code 1"),
+                    "content should include exit code, got: {}",
+                    outcome.output.content
+                );
+            }
+            Err(e) => {
+                panic!(
+                    "exit_code≠0 + empty stdout should NOT be SpawnError, got: {}",
+                    e.message
+                );
+            }
+        }
     }
 
+    /// Exit 0 + unparseable stdout → still `SpawnError`.
+    /// This is the normal case: process succeeded but broke protocol.
+    /// Regression test to ensure the nonzero-exit fix didn't break this.
     #[tokio::test]
-    async fn test_render_metadata_run_count() {
-        let meta = NodeMetadata { run_count: 5, timed_out: false };
-        let result = SubprocessExecutor::render_template(
-            "round_{{metadata.run_count}}", &meta, &empty_upstream(),
+    async fn test_zero_exit_unparseable_stdout_still_spawn_error() {
+        let cmd = if cfg!(windows) {
+            "cmd.exe /c echo not-json".into()
+        } else {
+            "echo not-json".into()
+        };
+        let executor = SubprocessExecutor::new(cmd, test_scripts_dir());
+        let mut ctx = NodeContext::default();
+        ctx.inputs = HashMap::new();
+        let result = executor
+            .run(ctx, Duration::from_secs(5), "zero_exit_bad_json", None)
+            .await;
+        assert!(
+            result.is_err(),
+            "exit 0 + unparseable stdout should still be SpawnError"
         );
-        assert_eq!(result, "round_5");
-    }
-
-    #[tokio::test]
-    async fn test_render_datarouter_route() {
-        let meta = test_metadata();
-        let mut upstream = HashMap::new();
-        upstream.insert("up".into(), NodeOutput { route: "complete".into(), content: "data".into() });
-        let result = SubprocessExecutor::render_template(
-            "{{datarouter.up.route}}", &meta, &upstream,
-        );
-        assert_eq!(result, "complete");
-    }
-
-    #[tokio::test]
-    async fn test_render_datarouter_content() {
-        let meta = test_metadata();
-        let mut upstream = HashMap::new();
-        upstream.insert("up".into(), NodeOutput { route: "ok".into(), content: "hello world".into() });
-        let result = SubprocessExecutor::render_template(
-            "{{datarouter.up.content}}", &meta, &upstream,
-        );
-        assert_eq!(result, "hello world");
     }
 
     #[test]

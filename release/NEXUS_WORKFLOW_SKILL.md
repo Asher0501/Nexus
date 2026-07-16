@@ -1,178 +1,348 @@
 # Nexus Workflow JSON Generator / Nexus 工作流 JSON 生成器
 
-Generate valid Nexus workflow JSON. Express ALL logic in the JSON — never modify the engine or `llm_node.py`.
-所有逻辑表达在 JSON 中——禁止修改引擎或 `llm_node.py`。
+Generate valid Nexus workflow JSON from user intent. Full schema and semantics are in the reference; this skill covers **what to do** and **what goes wrong**.
 
-## Reference Docs / 参考文档
+Reference: `release/WORKFLOW_REFERENCE.md` (schema & semantics), `release/QUICKSTART.md` (5-min tutorial), `release/NEXUS_VS_LANGGRAPH.md` (LangGraph comparison).
 
-- `release/WORKFLOW_REFERENCE.md` — complete schema, scheduling semantics, edge cases / 完整 Schema、调度语义、边界情况
-- `release/QUICKSTART.md` — 5-min quickstart + c2/c3/c4 demo workflows / 5 分钟入门 + 示范用例
-- `release/README.md` — API reference, system requirements / API 参考、系统要求
+## Pattern library / 模式库
 
-## Architecture / 架构
+These are **real, validated workflows** that demonstrate common topologies. When a user requests a workflow, find the closest pattern below and adapt it — rename nodes, swap providers, adjust prompts, add/remove branches. The LLM understands what is structural (edges, dataflows, route names) and what is business logic (prompts, commands, URLs).
 
-```
-JSON Workflow → Engine (DAG scheduler) → Nodes (execution)
-                  │                       ├─ type: "llm" → llm_node.py (pure glue / 纯胶水)
-                  │                       └─ type: "shell" → cmd /c <command>
-```
+### P1: Code review loop
 
-**Engine / 引擎**：DAG scheduling, edge matching (h_e+g_e), data routing, retry/timeout, convergence.
-**Engine does NOT / 引擎不管**：what nodes do internally. Nodes are black boxes following stdout JSON protocol.
-
-**llm_node.py**：receive `--cmd` → read stdin context → spawn CLI → forward output to log → multi-strategy extract route+content → if route missing/invalid → correction retry → write stdout.
-
-## Node Output Protocol / 节点输出协议 (NON-NEGOTIABLE / 不可协商)
-
-Every node MUST output exactly one JSON on stdout:
-```json
-{"route":"<string>","content":"<string>"}
-```
-- `route` — non-empty → used for `exit_reason` edge matching. Empty → only matches `exit_reason: null`.
-- `content` — arbitrary text, passed downstream via dataflows.
-- Exit 0 = `complete`. Non-zero = `failed`. Killed = `timeout`.
-
-## Provider Types / Provider 类型
-
-| Type / 类型 | When / 场景 | Notes / 备注 |
-|------|----------|---------|
-| `"llm"` | Claude/opencode/nga calls | Command is CLI flags only. Prompt via stdin. `{{datarouter.X.content}}` / `{{metadata.*}}` auto-replaced. |
-| `"shell"` | Scripts, echo, .bat | Wrapped in `cmd /c` (Win) or `sh -c` (Unix). |
-| `"subprocess"` | Direct spawn | Avoid. Use `"shell"` instead. |
-
-## LLM Command Template / LLM 命令模板
+Self-review loop with LLM → fix → review cycle, automatic exit after N rounds.
 
 ```json
-"command": "claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions"
+{"nodes":[
+  {"id":"seed","providers":[{"type":"shell","command":"echo fn divide(a:i32,b:i32)->i32{a/b}"}],"process_timeout_secs":10},
+  {"id":"review","providers":[{"type":"llm_sdk","model":"claude-sonnet-5-20251001","system_prompt":"You are a senior code reviewer. Find bugs, security issues, and design flaws.","prompt":"Review this code. If you find issues reply with route 'needs_fix' and explain the problem. If the code looks good reply with route 'approved'.\n\nCode to review:\n{{datarouter.seed.content}}\n{{datarouter.fixed_code.content}}","routes":["approved","needs_fix"],"max_tokens":4096}],"process_timeout_secs":600,"route_policy":{"type":"max_runs","max":3,"then_route":"approved"},"returns":["approved","needs_fix"]},
+  {"id":"fix","providers":[{"type":"llm_sdk","model":"claude-sonnet-5-20251001","system_prompt":"You are a code fixer. Apply the suggested fixes precisely.","prompt":"Fix the issues identified below. Output ONLY the corrected code.\n\nIssues: {{datarouter.review.content}}","routes":["done"],"max_tokens":4096}],"process_timeout_secs":600},
+  {"id":"report","providers":[{"type":"shell","command":"echo Final review: {{datarouter.review.content}}"}],"process_timeout_secs":10}
+],
+"edges":[
+  {"from":"seed","to":"review","trigger":"any","event":"complete"},
+  {"from":"review","to":"fix","trigger":"any","event":"complete","exit_reason":"needs_fix"},
+  {"from":"fix","to":"review","trigger":"any","event":"complete"},
+  {"from":"review","to":"report","trigger":"any","event":"complete","exit_reason":"approved"}
+],
+"dataflows":[
+  {"from":"seed","to":"review"},
+  {"from":"review","to":"fix"},
+  {"from":"fix","to":"review","alias":"fixed_code"},
+  {"from":"review","to":"report"}
+]}
 ```
-- Prompt goes via stdin (not `-p`) → no command-line length limit / prompt 走 stdin 无长度限制
-- `--dangerously-skip-permissions` → allow file Read/Write without interaction
+Adapt by replacing the seed command, review focus, model, and max_runs.
 
-## Templates / 模板
+### P2: Fan-out parallel analysis
 
-### Engine System Variables / 引擎系统变量
+Two LLM analyzers run in parallel, results merge into one report.
 
-The engine renders these in prompt and command templates **before** sending to the node:
-
-| Variable | Source | Example |
-|----------|--------|---------|
-| `{{metadata.run_count}}` | `NodeMetadata.run_count` | `1`, `2`, `3` — current execution round (1-based) |
-| `{{metadata.timed_out}}` | `NodeMetadata.timed_out` | `true` / `false` — whether previous run timed out |
-| `{{datarouter.<alias>.route}}` | `DataRouter.outputs[].route` | `complete`, `dispatch`, `again` — upstream node's route |
-| `{{datarouter.<alias>.content}}` | `DataRouter.outputs[].content` | Upstream node's full content text |
-
-- `<alias>` = source node ID (or `alias` field from dataflow).
-- Validator rejects unknown fields: `metadata.foo` / `datarouter.X.foo` / any other `{{prefix.key}}` → error.
-- At runtime, unsupported fields emit a `warn` log and pass through unchanged.
-
-### Single LLM / 单节点
 ```json
-{"nodes":[{"id":"ask","providers":[{"type":"llm","command":"claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions","prompt":"Output ONLY: {\"route\":\"ok\",\"content\":\"...\"}","routes":["ok"]}],"process_timeout_secs":120}]}
+{"nodes":[
+  {"id":"seed","providers":[{"type":"shell","command":"echo Analyze this codebase for issues."}],"process_timeout_secs":10},
+  {"id":"security_audit","providers":[{"type":"llm_sdk","model":"claude-sonnet-5-20251001","prompt":"Audit for security vulnerabilities. Output route 'ok' with findings.\\nContext: {{datarouter.seed.content}}","routes":["ok"],"max_tokens":2048}],"process_timeout_secs":300},
+  {"id":"perf_audit","providers":[{"type":"llm_sdk","model":"claude-sonnet-5-20251001","prompt":"Audit for performance issues. Output route 'ok' with findings.\\nContext: {{datarouter.seed.content}}","routes":["ok"],"max_tokens":2048}],"process_timeout_secs":300},
+  {"id":"merge","providers":[{"type":"shell","command":"python -c \"import json,sys; d=json.load(sys.stdin); i=d['inputs']; print(json.dumps({'route':'ok','content':f'SECURITY:\\n{i.get(chr(115)+chr(101)+chr(99)+chr(117)+chr(114)+chr(105)+chr(116)+chr(121)+chr(95)+chr(97)+chr(117)+chr(100)+chr(105)+chr(116),chr(63))}\\n\\nPERF:\\n{i.get(chr(112)+chr(101)+chr(114)+chr(102)+chr(95)+chr(97)+chr(117)+chr(100)+chr(105)+chr(116),chr(63))}'}))\""}],"process_timeout_secs":10}
+],
+"edges":[
+  {"from":"seed","to":"security_audit","trigger":"any","event":"complete"},
+  {"from":"seed","to":"perf_audit","trigger":"any","event":"complete"},
+  {"from":"security_audit","to":"merge","trigger":"all","event":"complete"},
+  {"from":"perf_audit","to":"merge","trigger":"all","event":"complete"}
+],
+"dataflows":[
+  {"from":"seed","to":"security_audit"},
+  {"from":"seed","to":"perf_audit"},
+  {"from":"security_audit","to":"merge"},
+  {"from":"perf_audit","to":"merge"}
+]}
+```
+The `trigger:"all"` on merge ensures both audits complete before merging.
+
+### P3: Conditional branch + error handling
+
+Decision node routes to success or failure path. Failed edge captures errors.
+
+```json
+{"nodes":[
+  {"id":"validator","providers":[{"type":"llm_sdk","model":"claude-sonnet-5-20251001","prompt":"Validate the input. Return route 'pass' or 'fail' with explanation.\\nInput: {{datarouter.seed.content}}","routes":["pass","fail"],"max_tokens":1024}],"process_timeout_secs":120},
+  {"id":"on_pass","providers":[{"type":"shell","command":"echo VALIDATION PASSED"}],"process_timeout_secs":10},
+  {"id":"on_fail","providers":[{"type":"shell","command":"echo VALIDATION FAILED"}],"process_timeout_secs":10}
+],
+"edges":[
+  {"from":"validator","to":"on_pass","trigger":"any","event":"complete","exit_reason":"pass"},
+  {"from":"validator","to":"on_fail","trigger":"any","event":"complete","exit_reason":"fail"}
+]
+}
+```
+Add `"event":"failed"` edges to catch runtime errors separately from business-logic rejection.
+
+### P4: HTTP orchestration chain
+
+Chain HTTP calls, each feeding data into the next.
+
+```json
+{"nodes":[
+  {"id":"fetch_user","providers":[{"type":"http","url":"https://jsonplaceholder.typicode.com/users/1","method":"GET"}],"process_timeout_secs":15},
+  {"id":"create_post","providers":[{"type":"http","url":"https://jsonplaceholder.typicode.com/posts","method":"POST","body":"{\"title\":\"nexus-test\",\"body\":\"user data: {{datarouter.fetch_user.content}}\",\"userId\":1}"}],"process_timeout_secs":15},
+  {"id":"verify","providers":[{"type":"shell","command":"python -c \"import json,sys; d=json.load(sys.stdin); resp=d['inputs'].get('create_post',''); ok='id' in resp; print(json.dumps({'route':'ok' if ok else 'err','content':'post created' if ok else 'failed'}))\""}],"process_timeout_secs":5}
+],
+"edges":[
+  {"from":"fetch_user","to":"create_post","trigger":"any","event":"complete"},
+  {"from":"create_post","to":"verify","trigger":"any","event":"complete"}
+],
+"dataflows":[
+  {"from":"fetch_user","to":"create_post"},
+  {"from":"create_post","to":"verify"}
+]}
 ```
 
-### Chain / 链式 (A→B→C)
+### P5: Retry loop with max_duration exit
+
+LLM task with retry on error, exits after accumulated time exceeds threshold.
+
+```json
+{"nodes":[
+  {"id":"task","providers":[{"type":"llm_sdk","model":"claude-sonnet-5-20251001","prompt":"Complete the assigned task. Output route 'ok' on success, 'err' on failure.\\nTask: {{datarouter.feedback.content}}","routes":["ok","err"],"max_tokens":2048}],"process_timeout_secs":300,"route_policy":{"type":"max_duration","max_secs":600,"then_route":"timeout"},"returns":["ok","err"]},
+  {"id":"retry_feedback","providers":[{"type":"shell","command":"echo Previous attempt failed. Try a different approach."}],"process_timeout_secs":5},
+  {"id":"on_ok","providers":[{"type":"shell","command":"echo Task completed successfully"}],"process_timeout_secs":5},
+  {"id":"on_timeout","providers":[{"type":"shell","command":"echo Task timed out after max duration"}],"process_timeout_secs":5}
+],
+"edges":[
+  {"from":"task","to":"retry_feedback","trigger":"any","event":"complete","exit_reason":"err"},
+  {"from":"retry_feedback","to":"task","trigger":"any","event":"complete"},
+  {"from":"task","to":"on_ok","trigger":"any","event":"complete","exit_reason":"ok"},
+  {"from":"task","to":"on_timeout","trigger":"any","event":"complete","exit_reason":"timeout"}
+],
+"dataflows":[
+  {"from":"retry_feedback","to":"task","alias":"feedback"}
+]}
+```
+
+### When no pattern fits
+
+Compose from the Quick Patterns below. The LLM can mix patterns — e.g. fan-out + conditional branch + error handling in one DAG.
+
+## Quick patterns / 快速模式
+
+### Single node / 单节点
+
+```json
+{"nodes":[{"id":"ask","providers":[{"type":"llm_sdk","model":"...","prompt":"...",
+"routes":["ok"]}],"process_timeout_secs":120}],"edges":[],"dataflows":[]}
+```
+
+### Chain A → B → C / 链式
+
 ```json
 "edges":[
-  {"from":"a","to":"b","trigger":"any","event":"complete"},
-  {"from":"b","to":"c","trigger":"any","event":"complete"}
+  {"from":"A","to":"B","trigger":"any","event":"complete"},
+  {"from":"B","to":"C","trigger":"any","event":"complete"}
+]
+```
+If B needs A's output, also add `"dataflows":[{"from":"A","to":"B"},{"from":"B","to":"C"}]`.
+
+### Fan-out / 扇出 (A → B, C in parallel)
+
+```json
+"edges":[
+  {"from":"A","to":"B","trigger":"any","event":"complete"},
+  {"from":"A","to":"C","trigger":"any","event":"complete"}
 ]
 ```
 
-### Fan-out / Fan-in / 扇出扇入
-`trigger: "all"` on merge node waits for all upstream. Edges and dataflows are independent — both must be declared.
+### Fan-in / 扇入 (A,B → merge)
 
-### Conditional Branch / 条件分支
-`exit_reason` on edge exactly matches node output `route`. Null = matches any route.
+`trigger: "all"` on the merge node's incoming edges. All upstream must complete before merge fires.
 
-### Directed Cycle / 有向环 (repeated operations / 重复操作)
+### Branch / 分支 (review → approved? deploy : fix)
 
 ```json
-{
-  "nodes": [
-    {"id":"A","providers":[{"type":"llm","command":"claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions","prompt":"Task (Round {{metadata.run_count}}/N). Continue → route='again'. Done → route='stop'. Output ONLY JSON.","routes":["again","stop"]}],"route_policy":{"type":"max_runs","max":N,"then_route":"stop"}},
-    {"id":"B","providers":[{"type":"llm","command":"claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions","prompt":"Process iteration. Output ONLY JSON with route='done'.","routes":["done"]}]}
-  ],
-  "edges": [
-    {"from":"A","to":"B","event":"complete","exit_reason":"again"},
-    {"from":"B","to":"A","event":"complete"},
-    {"from":"A","to":"C","event":"complete","exit_reason":"stop"}
-  ]
-}
+"edges":[
+  {"from":"review","to":"deploy","trigger":"any","event":"complete","exit_reason":"approved"},
+  {"from":"review","to":"fix",   "trigger":"any","event":"complete","exit_reason":"rejected"}
+]
 ```
 
-**Cycle rules / 环路规则**：
-- All nodes equal — output route, engine matches edges / 所有节点平等，输出 route，引擎匹配边
-- At least one node has `route_policy` (force route after N runs) or `threshold` → guarantees termination / 终止保证
-- Validator requires every node reachable → an exit node (node with 0 outgoing edges). Cycle needs exit edge → signal node.
-- `route_policy.max_runs=N`：node runs N-1 times, skipped on Nth trigger → saves one LLM call / 跑 N-1 次，第 N 次跳过省一次调用
+### Cycle / 循环 (review → fix → review → ... → exit)
 
-## Edge Rules / 边规则
+```json
+{"id":"review","route_policy":{"type":"max_runs","max":3,"then_route":"approved"}, ...}
+"edges":[
+  {"from":"review","to":"fix",   "trigger":"any","event":"complete","exit_reason":"rejected"},
+  {"from":"fix",   "to":"review","trigger":"any","event":"complete"},
+  {"from":"review","to":"retro", "trigger":"any","event":"complete","exit_reason":"approved"}
+]
+```
+`route_policy` guarantees termination: after N runs, engine overrides the route to exit the cycle.
 
-| Field / 字段 | Values / 值 | Meaning / 含义 |
-|-------|---------|---------|
-| `trigger` | `"any"` (default), `"all"` | `"all"` = wait for all incoming all-edges (fan-in) / 等所有入边 |
-| `event` | `"complete"`, `"failed"`, `"timeout"` | Event type from node exit code / 节点退出码决定 |
-| `exit_reason` | string or null | Exact match on node's `route`. null = any route / 匹配任意 |
-| `threshold` | integer, default 1 | Fire after N matching events. Use for self-loops / 自环用 |
+### Error handling / 错误处理 (A → success handler / error handler)
 
-## Dataflow Rules / 数据流规则
+```json
+"edges":[
+  {"from":"A","to":"on_success","trigger":"any","event":"complete"},
+  {"from":"A","to":"on_failure","trigger":"any","event":"failed"}
+]
+```
 
-- **Edges ≠ Dataflows**：edges schedule execution，dataflows route data。Both are independent graphs.
-- **`alias`**：rename input key for downstream. Default key = source node ID.
-- **Latest only**：in cycles，each run overwrites previous output.
+## Templates / 模板变量
 
-## File Output / 文件输出
+Available in `command` and `prompt` fields. Engine renders them before spawning the node.
 
-1. **Prompt instruction / Prompt 指令**：`"Write your review to review.md."` — Claude uses Write tool. No extra nodes.
-2. **Shell node**：`{"type":"shell","command":"python scripts/write_report.py"}` — script writes from stdin context.
+| Variable | Expands to |
+|----------|-----------|
+| `{{datarouter.X.content}}` | Upstream node X's output text |
+| `{{datarouter.X.route}}` | Upstream node X's route value |
+| `{{metadata.run_count}}` | Current execution round (1-based) |
+| `{{metadata.timed_out}}` | `true` if previous run timed out |
+| `{{node_dir}}` | Resolved scripts directory for this node |
 
-## Long Prompt Strategy / 长 Prompt 策略
+- Shell mode (`type: "shell"`) auto-escapes substituted values.
+- `{{node_dir}}` path resolution: node-level `scripts_dir` > workflow-level > `NEXUS_SCRIPTS_DIR` env > exe-relative search > `./scripts`.
 
-Prompt > ~4KB：give Claude the file path. Claude reads via Read tool. Path is short; content never hits command line.
-Prompt 超 4KB 时给 Claude 文件路径，Claude 用 Read 工具自读，内容不经过命令行。
+## Providers / 提供器
 
-## LLM Prompt Design / Prompt 设计
+| Type | Use case | Dependencies |
+|------|----------|--------------|
+| `llm_sdk` | Claude via Anthropic SDK (recommended) | `pip install anthropic`, API key |
+| `llm` | Any LLM CLI (claude, opencode, nga...) | CLI on PATH |
+| `shell` | Scripts, pipes, redirects | None |
+| `subprocess` | Direct spawn (no shell) | Avoid; use `shell` |
 
-- **Always specify exact output format** / 必须明确输出格式：`Output ONLY: {"route":"again|stop","content":"..."}`
-- **Always include `routes` list** / 必须有 routes 列表：`"routes": ["again", "stop"]`
-- **Template variables / 模板变量**：`{{datarouter.X.content}}` (upstream data), `{{datarouter.X.route}}` (upstream route), `{{metadata.run_count}}` (cycle round), `{{metadata.timed_out}}` (previous timeout)
+### llm vs llm_sdk: 谁执行 tool 调用？
 
-## MCP Integration / MCP 集成
+| | `llm` (CLI) | `llm_sdk` (SDK) |
+|---|---|---|
+| 谁调 API | CLI 二进制 | `llm_sdk.py` wrapper |
+| 谁执行 tool_use | CLI 内置 Agent loop，自动 | **必须自己在 wrapper 里写 tool loop** |
+| 文件操作 | CLI 自带 Read/Write/Edit 工具 | wrapper 用 Python `open()` 等实现 |
+| 引擎感知 | 不关心，只拿最终 stdout | 不关心，只拿最终 stdout |
+
+> CLI 是自带工具的 Agent；SDK 是裸 API client，tool loop 在 `llm_sdk.py` 里手动实现。
+
+### llm_sdk quick config / SDK 快速配置
+
+```json
+{"type":"llm_sdk","model":"claude-sonnet-5-20251001","prompt":"...","routes":["ok","err"],"max_tokens":4096}
+```
+
+Credentials auto-detected: `ANTHROPIC_API_KEY` → `ANTHROPIC_AUTH_TOKEN` → `~/.claude/settings.json` → `api_key_env` field.
+`ANTHROPIC_BASE_URL` is auto-read for non-Anthropic endpoints (DeepSeek etc.).
+
+### llm quick config / CLI 快速配置
+
+```json
+{"type":"llm","command":"claude -p \"{{prompt}}\" --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions","prompt":"...","routes":["ok"]}
+```
+
+### scripts_dir / 脚本目录
+
+```json
+{"scripts_dir":"./my_scripts","nodes":[
+  {"id":"A","scripts_dir":"./a_scripts","providers":[...]},
+  {"id":"B","providers":[...]}
+]}
+```
+Node-level overrides workflow-level, which falls back to env → auto-search → `./scripts`.
+
+## Validation / 校验
+
+**Always validate after generating JSON.** Fix all errors before execution.
+
+```bash
+nexus-cli --validate --workflow <file.json>
+# or via MCP:
+{"method":"validate_workflow","params":{"workflow_json":"<JSON>"},"id":1}
+```
+
+- **Errors block execution.** Common: `DuplicateNodeId`, `NoEntryNode`, `DatarouterRefWithoutDataflow`, `UnrecognizedTemplate`.
+- **Warnings are advisory.** Common: `DataflowWithoutSchedulingEdge` (B may run before A produces data), `UnmatchedRoute` (LLM route has no matching edge).
+
+## Pitfalls / 常见陷阱
+
+| Symptom | Likely cause |
+|---------|-------------|
+| Downstream gets empty data | Missing `dataflows` declaration, OR dataflow exists but no scheduling edge (B ran before A) |
+| Cycle never exits | Missing `route_policy` or `threshold` on the exit path |
+| Node that should start never does | `exit_reason` on edge doesn't exactly match node's `route` output |
+| `{{datarouter.X.content}}` not rendered | Missing `dataflows: [{from:"X",to:current_node}]` |
+| `{{node_dir}}` not rendered | `scripts_dir` not configured; check fallback chain |
+| Validator: UnrecognizedTemplate | Template uses `{{prefix.key}}` — only `metadata.*`, `datarouter.*.*`, and `node_dir` are valid |
+| llm_sdk: "API key not found" | Set `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, or configure `api_key_env` |
+| llm_sdk: "401 invalid x-api-key" | `ANTHROPIC_BASE_URL` not set (needed for non-Anthropic endpoints) |
+| llm_sdk: "anthropic package not installed" | `pip install anthropic` on target machine |
+| llm_sdk: wrong model | Use the provider's model name: `deepseek-v4-pro[1m]` for DeepSeek, `claude-sonnet-5-...` for Anthropic |
+| Dashboard: `release/release/` double path | `scripts_dir` is relative to CWD. Dashboard runs from `release/`, so `scripts_dir: "./release/scripts"` resolves to `release/release/scripts/`. Use `scripts_dir: "./scripts"` and let scripts auto-detect CWD. |
+| llm_sdk: node fails after many tool calls | LLM wasted tokens on path-searching or file-discovery before reaching its task. ① Pass **absolute paths** (never relative). ② Don't tell LLM to "read ALL related documents" or "explore the directory" — it tries every path variant and exhausts the 20-turn tool budget. Give one exact path. ③ Set `max_tokens` high enough for the actual task output, not the search preamble. |
+| llm_sdk: file not found at relative path | `llm_sdk.py` CWD is the engine process CWD, which varies by deployment (Dashboard, CLI, MCP). Always resolve paths to **absolute** before passing via dataflow. Relative paths are fragile. |
+| llm_sdk: `UnicodeEncodeError: 'charmap' codec can't encode character` | Python stdout on Windows uses the system code page (cp1252), not UTF-8. Output with Chinese characters fails to encode. The wrapper's `write_output()` uses `ensure_ascii=True` — non-ASCII is escaped as `\uXXXX`. `serde_json` on the engine side decodes it back correctly. |
+
+## Dashboard / 加载到 Dashboard
+
+Dashboard 运行在 `http://127.0.0.1:48080`。工作流通过 REST API 加载和执行。
+
+### 加载工作流
+
+**API 格式要求（关键）：** Dashboard 期望 `{"name":"...", "definition":{...}}` 包装格式，NOT 裸 JSON。
+
+```bash
+# ❌ 错误：裸 JSON → definition 字段缺失 → 存入空对象 {}
+curl -X POST http://127.0.0.1:48080/api/workflows -H "Content-Type: application/json" \
+  -d @workflow.json
+
+# ✅ 正确：包装格式
+curl -X POST http://127.0.0.1:48080/api/workflows -H "Content-Type: application/json" \
+  -d '{"name":"My Workflow","definition":{...}}'
+```
+
+**UTF-8 编码注意：** 当 workflow JSON 含中文、emoji 等特殊字符时，curl/bash 可能损坏编码导致 `invalid unicode code point` 错误。此时用 Python 直接 POST：
+
+```python
+import json, urllib.request
+with open('workflow.json', 'r', encoding='utf-8') as f:
+    definition = json.load(f)
+body = json.dumps({'name': 'My Workflow', 'definition': definition}, ensure_ascii=False).encode('utf-8')
+req = urllib.request.Request('http://127.0.0.1:48080/api/workflows', data=body, method='POST')
+req.add_header('Content-Type', 'application/json; charset=utf-8')
+resp = urllib.request.urlopen(req)
+print(resp.read().decode('utf-8'))  # → {"id":"...","status":"created"}
+```
+
+### API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/workflows` | 列出所有工作流 |
+| `POST` | `/api/workflows` | 创建工作流 `{"name":"...","definition":{...}}` |
+| `GET` | `/api/workflows/{id}` | 获取工作流详情（含解析后的 definition） |
+| `PUT` | `/api/workflows/{id}` | 更新工作流 |
+| `DELETE` | `/api/workflows/{id}` | 删除工作流 |
+| `POST` | `/api/workflows/{id}/run` | 触发运行 → 返回 `{run_id, dashboard_url}` |
+| `GET` | `/api/runs` | 列出所有运行记录 |
+| `GET` | `/api/runs/{id}` | 获取运行详情 |
+| `WS` | `/ws/runs/{run_id}` | WebSocket 实时状态推送 |
+
+### 运行工作流
+
+```bash
+# 通过 API 触发
+curl -X POST http://127.0.0.1:48080/api/workflows/{id}/run
+# → {"run_id":"...","dashboard_url":"http://127.0.0.1:48080","monitor_url":"ws://..."}
+```
+
+### Pitfalls / 加载陷阱
+
+| Symptom | Likely cause |
+|---------|-------------|
+| Dashboard View 显示空 | POST body 缺少 `name`/`definition` 包装，直接传了裸 JSON |
+| `invalid unicode code point` | curl/bash 损坏了含中文/emoji 的 JSON；改用 Python urllib POST |
+| `definition` 存为字符串 | `definition` 字段可以是 object 或 string，Dashboard 内部 auto-serialize。两种都支持 |
+| 端口占用 | Dashboard 已在运行中，直接调用 API 即可，无需重启 |
+
+## MCP / MCP 集成
 
 ```json
 {"method":"run_workflow","params":{"workflow_json":"<JSON>","dashboard_url":"http://127.0.0.1:48080"},"id":1}
 ```
-Returns `{run_id, dashboard_url, monitor_url}`。
-
-## Validation / 校验 (MUST DO / 必须执行)
-
-**After generating a workflow JSON, run the validator:**
-
-```bash
-nexus-cli --validate --workflow <file.json>
-```
-
-Or via MCP:
-```json
-{"method":"validate_workflow","params":{"workflow_json":"<JSON>"},"id":1}
-```
-
-**Regenerate if ANY error appears.** The validator catches:
-- `UnknownMetadataField` — `{{metadata.xxx}}` with unrecognized field (valid: `run_count`, `timed_out`)
-- `UnknownDatarouterField` — `{{datarouter.X.xxx}}` with unrecognized field (valid: `route`, `content`)
-- `DatarouterRefWithoutDataflow` — `{{datarouter.X.*}}` but no dataflow `X → this_node`
-- `UnrecognizedTemplate` — any `{{prefix.key}}` not matching `metadata.*` or `datarouter.*.*`
-
-## Common Pitfalls / 常见问题
-
-| Symptom / 现象 | Fix / 解法 |
-|---------|------|
-| Cycle never exits / 环路不退出 | Add `route_policy: {max_runs: N, then_route: "stop"}` |
-| Fix/worker node never starts | Match `exit_reason` exactly to LLM output `route` |
-| LLM route always empty / 始终为空 | Wrapper auto-corrects: missing/invalid route triggers retry. Still, ensure prompt asks for JSON and `routes` list is declared. |
-| Downstream gets no data / 下游无数据 | Add `dataflows: [{from: X, to: Y}]` |
-| `{{datarouter.X.content}}` not replaced / 未替换 | Check dataflows has `from: X, to: current_node` |
-| Validator: unrecognized template / 模板未识别 | Only `metadata.*` and `datarouter.*.*` are supported |
-| Validator: unknown metadata/datarouter field / 未知字段 | Only `metadata.{run_count,timed_out}` and `datarouter.X.{route,content}` |
-| Validator: "exit not reachable" | Add exit signal node + exit edge from cycle |
-| Prompt too long, claude hangs / 卡住 | Give file path instead of inline content / 给文件路径非内联 |
+Returns `{run_id, dashboard_url, monitor_url}`.

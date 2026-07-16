@@ -1,0 +1,54 @@
+{
+  "scripts_dir": "./tmp",
+  "nodes": [
+    {
+      "id": "start",
+      "providers": [{"type": "shell", "command": "echo {\"route\":\"go\",\"content\":\"start\"}"}],
+      "process_timeout_secs": 10
+    },
+    {
+      "id": "review",
+      "scripts_dir": "./scripts",
+      "providers": [{
+        "type": "llm",
+        "command": "claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions",
+        "prompt": "ROUND {{metadata.run_count}}/3.\n\nWORK PHASE (do ALL of this first, using tools — do NOT output JSON yet):\n1. Read tmp/code_review_task.md and follow every step.\n2. Use Read to read EVERY source file listed in the task.\n3. Review ALL files across all 4 dimensions (bugs, security, perf, quality).\n4. Use Write to save ALL findings with FIND/SUGGESTION to review_doc.md.\n\nONLY AFTER all work above is complete, output this routing JSON on a single line:\n{\"route\":\"needs_fix\",\"content\":\"found N issues\"}\nOr if nothing found:\n{\"route\":\"approved\",\"content\":\"all clean\"}\n\nPrevious round: {{datarouter.review_doc.content}}",
+        "routes": ["needs_fix", "approved"],
+        "max_tokens": 8192
+      }],
+      "process_timeout_secs": 600,
+      "route_policy": { "type": "max_runs", "max": 3, "then_route": "approved" }
+    },
+    {
+      "id": "fix",
+      "scripts_dir": "./scripts",
+      "providers": [{
+        "type": "llm",
+        "command": "claude --output-format stream-json --verbose --include-partial-messages --dangerously-skip-permissions",
+        "prompt": "WORK PHASE (do ALL of this first using tools — do NOT output JSON yet):\n1. Read tmp/code_fix_task.md and follow every step.\n2. Read review_doc.md to get the review findings.\n3. For each issue: Read the source file, apply the fix with Edit/Write.\n4. After ALL fixes: append fix status to review_doc.md.\n\nONLY AFTER all work is complete, output this routing JSON on a single line:\n{\"route\":\"fixed\",\"content\":\"fixed N issues\"}\n\nReview data: {{datarouter.review.content}}",
+        "routes": ["fixed"],
+        "max_tokens": 8192
+      }],
+      "process_timeout_secs": 600
+    },
+    {
+      "id": "summary_report",
+      "scripts_dir": "./tmp",
+      "providers": [{
+        "type": "shell",
+        "command": "python {{node_dir}}/code_review_report.py"
+      }],
+      "process_timeout_secs": 30
+    }
+  ],
+  "edges": [
+    { "from": "start",   "to": "review",        "trigger": "any", "event": "complete" },
+    { "from": "review",  "to": "fix",            "trigger": "any", "event": "complete", "exit_reason": "needs_fix" },
+    { "from": "fix",     "to": "review",         "trigger": "any", "event": "complete" },
+    { "from": "review",  "to": "summary_report", "trigger": "any", "event": "complete", "exit_reason": "approved" }
+  ],
+  "dataflows": [
+    { "from": "fix",     "to": "review",         "alias": "review_doc" },
+    { "from": "review",  "to": "fix",            "alias": "review" }
+  ]
+}

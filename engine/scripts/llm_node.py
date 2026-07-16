@@ -1,62 +1,28 @@
 """
-LLM Node — universal Nexus wrapper for any LLM CLI.
+LLM Node — Nexus wrapper for any LLM CLI (claude, opencode, nga, codeagent, ...).
 
-Supports any CLI via --cmd (engine passes the full rendered command):
-  claude:   claude -p "prompt" --output-format stream-json --include-partial-messages
-  opencode: opencode run --format json --auto -- "prompt"
-  nga:      nga run --json "prompt"
-  codeagent: codeagent -p "prompt"
-
-Protocol:
-  stdin   ← Nexus NodeContext JSON (inputs, extensions, metadata)
-  stdout  → real-time forwarded to stderr (engine captures → log chunks)
-  stdout  → final line parsed as Nexus NodeOutput for routing
-  stderr  → also forwarded to engine log
+Protocol layer (stdin, output parsing, route correction) is shared
+in nexus_protocol.py.  This file only contains CLI-specific logic:
+binary resolution, subprocess spawning, real-time streaming.
 """
+
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 
-
-# ═══════════════════════════════════════════════════════════════════
-# CLI args
-# ═══════════════════════════════════════════════════════════════════
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Nexus universal LLM node")
-    p.add_argument("--cmd", default="",
-                   help="Full rendered CLI command to execute")
-    p.add_argument("--route", default="",
-                   help="Comma-separated expected route values")
-    p.add_argument("--timeout", type=int, default=0,
-                   help="Internal timeout seconds (0 = rely on engine)")
-    return p.parse_args()
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Nexus protocol — stdin
-# ═══════════════════════════════════════════════════════════════════
-
-def read_nexus_context() -> dict:
-    raw = sys.stdin.read()
-    if not raw.strip():
-        return {"inputs": {}, "extensions": {}, "metadata": {"run_count": 1, "timed_out": False}}
-    return json.loads(raw)
-
+from nexus_protocol import log, parse_output, read_context, try_route_correction, write_output
 
 # ═══════════════════════════════════════════════════════════════════
 # CLI resolution — cross-platform (Windows + Linux)
 # ═══════════════════════════════════════════════════════════════════
 
-def _resolve_program(name: str) -> str:
-    """Resolve CLI name to executable path."""
-    # Prefer .exe on Windows (bypasses .cmd wrapper)
+def resolve_program(name: str) -> str:
+    """Resolve CLI name to executable path.  Prefer .exe on Windows."""
     if sys.platform == "win32":
         exe = shutil.which(name + ".exe")
         if exe:
@@ -68,24 +34,37 @@ def _resolve_program(name: str) -> str:
 # Subprocess execution
 # ═══════════════════════════════════════════════════════════════════
 
-def emit_stderr(line: str):
-    print(line, file=sys.stderr, flush=True)
-
-
-def run_cmd(cmd_str: str, stdin_text: str | None = None) -> subprocess.Popen:
-    """Spawn CLI. Prompt goes via stdin (not -p), avoiding command-line limits."""
+def spawn(cmd_str: str, stdin_text: str | None = None) -> subprocess.Popen:
+    """Spawn CLI process.  Prompt goes via stdin (not -p), avoiding
+    command-line length limits on Windows."""
     program = cmd_str.split(" ", 1)[0]
-    exe = _resolve_program(program)
+    exe = resolve_program(program)
     if exe != program:
         cmd_str = exe + cmd_str[len(program):]
 
-    emit_stderr(f"[llm_node] {os.path.basename(exe)}")
+    real_exe = exe
+    if sys.platform == "win32" and exe.lower().endswith(".cmd"):
+        # .CMD wrappers add an extra cmd.exe layer that kills streaming.
+        # Prefer the real node binary when available (Claude Code layout).
+        node_path = os.path.join(os.path.dirname(exe), "..", "dist", "claude.js")
+        if os.path.isfile(node_path):
+            real_exe = "node"
+            cmd_str = f'node "{node_path}" {cmd_str[len(program):].lstrip()}'
+    elif sys.platform == "win32":
+        # Try .exe next to .cmd (some npm packages ship both)
+        exe_path = os.path.splitext(exe)[0] + ".exe"
+        if os.path.isfile(exe_path):
+            real_exe = exe_path
+            cmd_str = real_exe + cmd_str[len(program):]
+
+    log(f"[llm_node] {os.path.basename(real_exe)}")
     proc = subprocess.Popen(
         cmd_str,
         stdin=subprocess.PIPE if stdin_text else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        bufsize=1,       # line-buffered — critical for real-time streaming
         shell=False,
     )
     if stdin_text and proc.stdin:
@@ -94,14 +73,10 @@ def run_cmd(cmd_str: str, stdin_text: str | None = None) -> subprocess.Popen:
     return proc
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Output streaming → engine log (not routing)
-# ═══════════════════════════════════════════════════════════════════
-
-def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
+def stream(proc: subprocess.Popen, timeout: int = 0) -> str:
     """Read stdout line-by-line, forward each line to stderr (engine log).
-    Returns complete stdout for final parsing. Stderr read concurrently.
-    Sends periodic heartbeats to flush pipe buffers for real-time streaming."""
+    Returns complete stdout text for final parsing.  Sends periodic
+    heartbeats to flush pipe buffers."""
     deadline = time.time() + timeout if timeout > 0 else None
     stdout_lines: list[str] = []
     stderr_done = threading.Event()
@@ -112,7 +87,7 @@ def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
             for line in proc.stderr:
                 line = line.rstrip("\n\r")
                 if line:
-                    emit_stderr(line)
+                    log(line)
         except Exception:
             pass
         finally:
@@ -122,7 +97,7 @@ def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
         while not heartbeat_stop.is_set():
             time.sleep(0.3)
             if not heartbeat_stop.is_set():
-                emit_stderr(" ")
+                log(" ")
 
     threading.Thread(target=_read_stderr, daemon=True).start()
     threading.Thread(target=_heartbeat, daemon=True).start()
@@ -132,10 +107,10 @@ def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
             line = line.rstrip("\n\r")
             if line:
                 stdout_lines.append(line)
-                emit_stderr(line)
+                log(line)
             if deadline and time.time() > deadline:
                 proc.kill()
-                emit_stderr("[llm_node] timeout")
+                log("[llm_node] timeout")
                 break
     except Exception:
         pass
@@ -146,52 +121,12 @@ def stream_stdout_and_stderr(proc: subprocess.Popen, timeout: int) -> str:
     return "\n".join(stdout_lines)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Output parsing — find route+content JSON in any output
-# ═══════════════════════════════════════════════════════════════════
-
-ROUTE_RE = re.compile(
-    r'"?route"?\s*:\s*"?([^",}\s]+)"?\s*,\s*"?content"?\s*:\s*"((?:[^"\\]|\\.)*)"',
-    re.DOTALL,
-)
-
-def parse_text_output(stdout: str) -> dict:
-    """Search ALL output for route+content JSON, anywhere.
-    Handles standard JSON, unquoted keys, NDJSON escaped output."""
-    # 1. Try direct JSON parse
-    stripped = stdout.strip()
-    if stripped.startswith("{"):
-        try:
-            obj = json.loads(stripped)
-            if "route" in obj:
-                return {"route": str(obj["route"]), "content": str(obj.get("content", ""))}
-        except json.JSONDecodeError:
-            pass
-
-    # 2. Normalize NDJSON escapes: \" → "
-    unescaped = stdout.replace('\\"', '"').replace('\\\\', '\\')
-    for m in ROUTE_RE.finditer(unescaped):
-        route = m.group(1)
-        content_raw = m.group(2)
-        try:
-            content = json.loads('"' + content_raw + '"')
-        except json.JSONDecodeError:
-            content = content_raw
-        return {"route": route, "content": content}
-
-    # 3. Last resort: search the raw stdout for unquoted keys
-    for m in re.finditer(
-        r'\broute\s*:\s*"?(\w+)"?\s*[,;]\s*content\s*:\s*"((?:[^"\\]|\\.)*)"',
-        stdout, re.DOTALL
-    ):
-        content_raw = m.group(2)
-        try:
-            content = json.loads('"' + content_raw + '"')
-        except json.JSONDecodeError:
-            content = content_raw
-        return {"route": m.group(1), "content": content}
-
-    return {"route": "", "content": stripped}
+def wait(proc: subprocess.Popen):
+    """Wait for process with a 5s grace period, kill if stuck."""
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -199,70 +134,48 @@ def parse_text_output(stdout: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
-    args = parse_args()
-    ctx = read_nexus_context()
+    p = argparse.ArgumentParser(description="Nexus universal LLM node")
+    p.add_argument("--cmd", default="", help="Full rendered CLI command")
+    p.add_argument("--timeout", type=int, default=0,
+                   help="Internal timeout seconds (0 = rely on engine)")
+    args = p.parse_args()
+
+    ctx = read_context()
 
     cmd_str = args.cmd or ctx.get("extensions", {}).get("_cmd", "")
     if not cmd_str:
-        sys.stdout.write(json.dumps({"route": "error", "content": "no --cmd provided"}))
+        write_output({"route": "error", "content": "no --cmd provided"})
         sys.exit(1)
 
-    # Get prompt from stdin context (engine sends it there).
     prompt = ctx.get("extensions", {}).get("prompt", "")
 
-    # If command has {{prompt}}, replace it (backward compat, -p mode).
+    # Backward compat: if command has {{prompt}}, inject it there.
+    # Otherwise pass prompt via stdin (avoids command-line length limits).
     if prompt and "{{prompt}}" in cmd_str:
-        safe_prompt = prompt.replace("\\", "\\\\").replace("\"", "\\\"")
-        cmd_str = cmd_str.replace("{{prompt}}", safe_prompt)
+        safe = prompt.replace("\\", "\\\\").replace('"', '\\"')
+        cmd_str = cmd_str.replace("{{prompt}}", safe)
         use_stdin = False
     else:
-        # No {{prompt}} → pass prompt via CLI stdin instead of -p
         use_stdin = bool(prompt)
 
+    expected_routes = ctx.get("extensions", {}).get("route", "")
+
+    def _run(prompt_text: str) -> str:
+        proc = spawn(cmd_str, stdin_text=prompt_text)
+        text = stream(proc, args.timeout)
+        wait(proc)
+        return text
+
     try:
-        proc = run_cmd(cmd_str, stdin_text=prompt if use_stdin else None)
+        stdout_text = _run(prompt if use_stdin else None)
     except FileNotFoundError as e:
-        sys.stdout.write(json.dumps({"route": "error", "content": f"not found: {e}"}))
+        write_output({"route": "error", "content": f"not found: {e}"})
         sys.exit(1)
 
-    stdout_text = stream_stdout_and_stderr(proc, args.timeout)
-    emit_stderr(f"[llm_node] captured {len(stdout_text)} chars from stdout")
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-
-    output = parse_text_output(stdout_text)
-    expected_routes = ctx.get("extensions", {}).get("route", "")  # "again,stop"
-
-    # If route is missing or not in expected list, retry with correction.
-    route_ok = output.get("route") and (
-        not expected_routes or output["route"] in expected_routes.split(",")
-    )
-    if not route_ok and cmd_str:
-        emit_stderr(f"[llm_node] route={output.get('route','')} invalid/missing, retrying")
-        # Build correction prompt targeting a valid route
-        target = expected_routes.split(",")[0].strip() if expected_routes else "ok"
-        correction = f'Output EXACTLY this JSON: {{"route":"{target}","content":"done"}}'
-        try:
-            proc2 = run_cmd(cmd_str, stdin_text=correction)
-        except Exception:
-            proc2 = None
-        if proc2:
-            stdout2_text = stream_stdout_and_stderr(proc2, args.timeout)
-            try:
-                proc2.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc2.kill()
-            output2 = parse_text_output(stdout2_text)
-            route2 = output2.get("route", "")
-            if route2 and (not expected_routes or route2 in expected_routes.split(",")):
-                output = output2
-                emit_stderr(f"[llm_node] correction OK: route={route2}")
-            else:
-                emit_stderr(f"[llm_node] correction failed: route={route2}")
-
-    sys.stdout.write(json.dumps(output, ensure_ascii=False))
+    log(f"[llm_node] captured {len(stdout_text)} chars from stdout")
+    output = parse_output(stdout_text)
+    output = try_route_correction(output, expected_routes, _run)
+    write_output(output)
 
 
 if __name__ == "__main__":

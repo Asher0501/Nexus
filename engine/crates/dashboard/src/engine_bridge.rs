@@ -23,7 +23,7 @@ pub fn validate_workflow(json: &str) -> Result<(), Vec<String>> {
     validate(&def).map_err(|errors| errors.iter().map(std::string::ToString::to_string).collect())
 }
 
-/// Run a workflow definition and broadcast events to the given WsRoom.
+/// Run a workflow definition and broadcast events to the given `WsRoom`.
 ///
 /// If `cancel_flag` is provided, external callers can set it to `true` to
 /// stop the engine at the next event-loop iteration.
@@ -35,7 +35,7 @@ pub async fn run_workflow(
     cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<(), String> {
     let def: WorkflowDef = serde_json::from_str(json).map_err(|e| format!("JSON parse error: {e}"))?;
-    let dummy_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _dummy_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Err(errors) = validate(&def) {
         let msg: Vec<String> = errors.iter().map(std::string::ToString::to_string).collect();
         return Err(msg.join("; "));
@@ -43,7 +43,7 @@ pub async fn run_workflow(
 
     // Ensure log directory exists
     let _ = std::fs::create_dir_all("log");
-    let log_path = format!("log/run-{}.log", run_id);
+    let log_path = format!("log/run-{run_id}.log");
     let log_file = std::sync::Mutex::new(
         std::fs::OpenOptions::new()
             .create(true).append(true)

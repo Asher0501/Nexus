@@ -1,0 +1,396 @@
+"""
+LLM SDK Node — Nexus wrapper for Anthropic Python SDK.
+
+Unlike llm_node.py (which spawns a CLI), this script calls the Anthropic
+API directly via `pip install anthropic`. This enables:
+  - Token-level streaming (via stderr)
+  - Native tool calling
+  - Structured output (JSON mode)
+  - No CLI dependency on PATH
+
+Protocol (same as llm_node.py):
+  stdin   ← Nexus NodeContext JSON (inputs, extensions, metadata,
+             + _sdk_model, _sdk_api_key_env, _sdk_system_prompt,
+               _sdk_max_tokens)
+  stderr  → token stream / log lines (engine captures as chunks)
+  stdout  → final line: {"route":"...","content":"..."}
+
+Requirements:
+  pip install anthropic
+  ANTHROPIC_API_KEY env var (or set _sdk_api_key_env in context)
+"""
+import json
+import os
+import re
+import sys
+import time
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Surrogate sanitization
+# ═══════════════════════════════════════════════════════════════════
+# Lone surrogates (U+D800–U+DFFF) can enter the pipeline via Windows
+# console API transcoding or serde_json escape sequences. They are NOT
+# valid Unicode and can't be UTF-8 encoded. Scrub them before any
+# json.dumps / sys.stdout.write to avoid fatal crashes.
+
+_SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
+
+
+def sanitize_str(s: str) -> str:
+    """Replace lone surrogates with U+FFFD."""
+    return _SURROGATE_RE.sub('�', s)
+
+try:
+    import anthropic
+except ImportError:
+    sys.stdout.write(json.dumps({
+        "route": "error",
+        "content": "anthropic package not installed. Run: pip install anthropic"
+    }))
+    sys.exit(1)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Nexus protocol — stdin
+# ═══════════════════════════════════════════════════════════════════
+
+def read_nexus_context() -> dict:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        return {"inputs": {}, "extensions": {}, "metadata": {"run_count": 1, "timed_out": False}}
+    return json.loads(raw)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Configuration from extensions
+# ═══════════════════════════════════════════════════════════════════
+
+def _load_settings_env() -> dict:
+    """Read env vars from Claude Code settings.json as fallback.
+    Also injects them into os.environ so the Anthropic SDK picks up
+    ANTHROPIC_BASE_URL etc. automatically."""
+    settings_path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    try:
+        with open(settings_path) as f:
+            env_vars = json.load(f).get("env", {})
+        # Inject into os.environ so SDK picks them up (e.g. ANTHROPIC_BASE_URL)
+        for k, v in env_vars.items():
+            if k not in os.environ and v:
+                os.environ[k] = v
+        return env_vars
+    except Exception:
+        return {}
+
+def get_sdk_config(ctx: dict) -> dict:
+    exts = ctx.get("extensions", {})
+    api_key_env = exts.get("_sdk_api_key_env", "ANTHROPIC_API_KEY")
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    if not api_key:
+        # Fallback: read from Claude Code settings.json
+        settings_env = _load_settings_env()
+        api_key = settings_env.get(api_key_env) or settings_env.get("ANTHROPIC_AUTH_TOKEN")
+    if not api_key:
+        raise ValueError(
+            f"API key not found in env var '{api_key_env}', ANTHROPIC_AUTH_TOKEN, "
+            f"or ~/.claude/settings.json. Set one of them or configure _sdk_api_key_env."
+        )
+    max_tokens = exts.get("_sdk_max_tokens", "4096")
+    return {
+        "api_key": api_key,
+        "model": exts.get("_sdk_model", "claude-sonnet-5-20251001"),
+        "system": exts.get("_sdk_system_prompt", None),
+        "max_tokens": int(max_tokens),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# File-operation tools — the LLM can call these directly
+# ═══════════════════════════════════════════════════════════════════
+
+FILE_TOOLS = [
+    {
+        "name": "read_file",
+        "description": "Read the contents of a file. Use this to read documents for review.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to the file to read"}
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "write_file",
+        "description": "Write content to a file, overwriting any existing content. Creates a .bak backup automatically before overwriting.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to write the file"},
+                "content": {"type": "string", "description": "Complete file content to write"}
+            },
+            "required": ["path", "content"]
+        }
+    },
+    {
+        "name": "append_to_file",
+        "description": "Append content to a file. Creates the file if it doesn't exist. Use this to add review findings or fix status to the audit trail.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to the file"},
+                "content": {"type": "string", "description": "Content to append"}
+            },
+            "required": ["path", "content"]
+        }
+    }
+]
+
+
+def _execute_tool(tool_name: str, tool_input: dict) -> str:
+    """Execute a file-operation tool and return the result string."""
+    path = tool_input.get("path", "")
+
+    if tool_name == "read_file":
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return f"File '{path}' read successfully ({len(content)} chars):\n\n{content}"
+        except FileNotFoundError:
+            return f"ERROR: File '{path}' not found"
+        except Exception as e:
+            return f"ERROR reading '{path}': {e}"
+
+    elif tool_name == "write_file":
+        content = tool_input.get("content", "")
+        try:
+            # Create backup
+            if os.path.exists(path):
+                bak = path + ".bak"
+                if os.path.exists(bak):
+                    os.remove(bak)
+                os.rename(path, bak)
+            # Write
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return f"File '{path}' written successfully ({len(content)} chars). Backup at '{path}.bak' if file existed."
+        except Exception as e:
+            return f"ERROR writing '{path}': {e}"
+
+    elif tool_name == "append_to_file":
+        content = tool_input.get("content", "")
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(content)
+            return f"Appended {len(content)} chars to '{path}'."
+        except Exception as e:
+            return f"ERROR appending to '{path}': {e}"
+
+    return f"ERROR: Unknown tool '{tool_name}'"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Anthropic SDK call
+# ═══════════════════════════════════════════════════════════════════
+
+def call_anthropic_stream(sdk_cfg: dict, prompt: str) -> str:
+    """Call Anthropic API with tool-use loop.
+
+    Gives the LLM read_file / write_file / append_to_file tools.
+    Uses non-streaming API for tool-calling turns; streams only
+    the final text response.
+    """
+    client = anthropic.Anthropic(api_key=sdk_cfg["api_key"])
+    system = sdk_cfg.get("system")
+    messages = [{"role": "user", "content": prompt}]
+
+    emit_stderr(f"[llm_sdk] model={sdk_cfg['model']} max_tokens={sdk_cfg['max_tokens']}")
+
+    start_time = time.time()
+    total_tokens = 0
+
+    # Tool-use loop — max 20 turns
+    for _turn in range(20):
+        kwargs = dict(
+            model=sdk_cfg["model"],
+            max_tokens=sdk_cfg["max_tokens"],
+            messages=messages,
+            tools=FILE_TOOLS,
+        )
+        if system:
+            kwargs["system"] = system
+
+        try:
+            response = client.messages.create(**kwargs)
+        except anthropic.APIError as e:
+            elapsed = time.time() - start_time
+            emit_stderr(f"[llm_sdk] API error after {elapsed:.1f}s: {e}")
+            return json.dumps({"route": "error", "content": f"API error: {e}"})
+
+        total_tokens += response.usage.output_tokens if hasattr(response, 'usage') else 0
+
+        if response.stop_reason == "tool_use":
+            # Collect tool_use blocks
+            tool_results = []
+            assistant_content = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    tool_name = block.name
+                    tool_input = block.input if isinstance(block.input, dict) else {}
+                    emit_stderr(
+                        f"[llm_sdk] tool_call: {tool_name}"
+                        f"({tool_input.get('path','?')})"
+                    )
+                    result = _execute_tool(tool_name, tool_input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+                assistant_content.append(block)
+
+            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append({"role": "user", "content": tool_results})
+            continue
+
+        # stop_reason == "end_turn" — extract text
+        text_parts = []
+        final_content = []
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+                # Stream final text to stderr
+                emit_token(block.text)
+            final_content.append(block)
+
+        messages.append({"role": "assistant", "content": final_content})
+
+        elapsed = time.time() - start_time
+        full = "".join(text_parts)
+        emit_stderr(f"\n[llm_sdk] {total_tokens} tokens in {elapsed:.1f}s")
+        return full
+
+    # Loop exhausted — shouldn't happen normally
+    elapsed = time.time() - start_time
+    emit_stderr(f"[llm_sdk] max tool turns reached after {elapsed:.1f}s")
+    return json.dumps({"route": "error", "content": "Max tool-use turns exceeded (20)"})
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Output parsing — extract route+content from LLM response
+# ═══════════════════════════════════════════════════════════════════
+
+def parse_llm_output(text: str, expected_routes: list[str]) -> dict:
+    """Parse LLM response to extract route and content."""
+    stripped = text.strip()
+
+    # 1. Try direct JSON parse
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(stripped)
+            if "route" in obj:
+                return {"route": str(obj["route"]), "content": str(obj.get("content", ""))}
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Search for JSON block in output
+    import re
+    for m in re.finditer(r'\{[^{}]*"route"\s*:\s*"[^"]+"\s*[,}][^{}]*\}', stripped):
+        try:
+            obj = json.loads(m.group())
+            if "route" in obj:
+                return {"route": str(obj["route"]), "content": str(obj.get("content", ""))}
+        except json.JSONDecodeError:
+            continue
+
+    # 3. Fallback: return full text as content, no route
+    return {"route": "", "content": stripped}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════
+
+def main():
+    ctx = read_nexus_context()
+
+    try:
+        sdk_cfg = get_sdk_config(ctx)
+    except ValueError as e:
+        sys.stdout.write(json.dumps({"route": "error", "content": str(e)}))
+        sys.exit(1)
+
+    prompt = ctx.get("extensions", {}).get("prompt", "")
+    if not prompt:
+        # No prompt in extensions → build from inputs
+        inputs = ctx.get("inputs", {})
+        if inputs:
+            prompt = "\n".join(f"[{k}]: {v}" for k, v in inputs.items())
+        else:
+            prompt = "No input provided."
+
+    # Include metadata in system prompt context if not already set
+    meta = ctx.get("metadata", {})
+    if meta.get("timed_out"):
+        timeout_note = (
+            "\n\nIMPORTANT: The previous execution of this node timed out. "
+            "Your input context may be incomplete. Adjust your response accordingly "
+            "or output {\"route\":\"timeout\",\"content\":\"\"} to propagate the timeout."
+        )
+        prompt += timeout_note
+
+    expected_routes_str = ctx.get("extensions", {}).get("route", "")
+    expected_routes = expected_routes_str.split(",") if expected_routes_str else []
+
+    # Scrub lone surrogates from prompt before API call — these can leak
+    # in from serde_json \uXXXX escapes decoded by Python's json.loads.
+    prompt = sanitize_str(prompt)
+
+    try:
+        response = call_anthropic_stream(sdk_cfg, prompt)
+    except Exception as e:
+        emit_stderr(f"[llm_sdk] fatal: {e}")
+        sys.stdout.write(json.dumps({"route": "error", "content": sanitize_str(str(e))}))
+        sys.exit(1)
+
+    output = parse_llm_output(response, expected_routes)
+
+    # Route correction: if route is empty or not in expected list
+    route_ok = output.get("route") and (
+        not expected_routes or output["route"] in expected_routes
+    )
+    if not route_ok and output["route"]:
+        emit_stderr(
+            f"[llm_sdk] route='{output.get('route','')}' not in {expected_routes}, "
+            f"retrying with correction"
+        )
+        target = expected_routes[0] if expected_routes else "ok"
+        correction = (
+            f'Output EXACTLY this JSON (no other text): '
+            f'{{"route":"{target}","content":"done"}}'
+        )
+        try:
+            response2 = call_anthropic_stream(sdk_cfg, correction)
+            output2 = parse_llm_output(response2, expected_routes)
+            if output2.get("route") and (
+                not expected_routes or output2["route"] in expected_routes
+            ):
+                output = output2
+                emit_stderr(f"[llm_sdk] correction OK: route={output2['route']}")
+            else:
+                emit_stderr(f"[llm_sdk] correction failed")
+        except Exception:
+            emit_stderr(f"[llm_sdk] correction call failed")
+
+    # Sanitize: scrub any lone surrogates that may have leaked in
+    output["route"] = sanitize_str(output["route"])
+    output["content"] = sanitize_str(output["content"])
+    sys.stdout.write(json.dumps(output, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,48 @@
+{
+  "nodes": [
+    {
+      "id": "review",
+      "providers": [
+        {
+          "type": "llm_sdk",
+          "model": "claude-sonnet-5-20251001",
+          "system_prompt": "You are a code reviewer. Be concise and direct.",
+          "prompt": "Review this code for bugs and code quality issues:\n\n```python\ndef add(a, b):\n    return a + b\n\ndef divide(a, b):\n    return a / b\n```\n\nOutput EXACTLY this JSON (no other text):\n{\"route\":\"clean|issues_found\",\"content\":\"Your review findings here\"}\n\nChoose 'clean' if the code looks good, 'issues_found' if there are problems.",
+          "routes": ["clean", "issues_found"],
+          "max_tokens": 512
+        }
+      ],
+      "process_timeout_secs": 60,
+      "returns": ["clean", "issues_found"]
+    },
+    {
+      "id": "report",
+      "providers": [
+        {
+          "type": "llm_sdk",
+          "model": "claude-sonnet-5-20251001",
+          "prompt": "Summarize the following code review finding into a one-line report:\n\nFinding: {{datarouter.review.content}}\n\nOutput EXACTLY: {\"route\":\"done\",\"content\":\"Your one-line summary\"}",
+          "routes": ["done"],
+          "max_tokens": 256
+        }
+      ],
+      "process_timeout_secs": 60,
+      "returns": ["done"]
+    }
+  ],
+  "edges": [
+    {
+      "from": "review",
+      "to": "report",
+      "trigger": "any",
+      "event": "complete",
+      "exit_reason": "issues_found"
+    }
+  ],
+  "dataflows": [
+    {
+      "from": "review",
+      "to": "report"
+    }
+  ]
+}

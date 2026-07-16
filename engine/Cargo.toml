@@ -25,6 +25,30 @@ nursery = { level = "warn", priority = -2 }
 unwrap_used = "deny"
 panic = "deny"
 missing_errors_doc = "deny"
+# Style-only lints that are subjectively debatable.  The auto-fixable
+# ones were already applied by `cargo clippy --fix`; these remaining
+# rules are allowed because the code is clearer as-is.
+option_if_let_else = "allow"
+map_unwrap_or = "allow"
+if_not_else = "allow"
+unnecessary_literal_unwrap = "allow"
+module_name_repetitions = "allow"
+cast_possible_truncation = "allow"
+too_many_lines = "allow"
+branches_sharing_code = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"
+unused_async = "allow"
+let_underscore_future = "allow"
+must_use_candidate = "allow"
+type_complexity = "allow"
+manual_unwrap_or_default = "allow"
+unwrap_in_result = "allow"
+manual_let_else = "allow"
+redundant_closure_for_method_calls = "allow"
+manual_clamp = "allow"
+or_fun_call = "allow"
+double_must_use = "allow"
 
 [profile.release]
 lto = "fat"

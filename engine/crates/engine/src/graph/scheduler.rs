@@ -45,7 +45,7 @@ pub enum NodeResult {
 impl NodeResult {
     /// Returns `true` if the node is in a terminal state.
     #[must_use]
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Failed(_) | Self::TimedOut)
     }
 }
@@ -107,14 +107,18 @@ pub struct RuntimeState {
     /// is not retried, so downstream retries can detect that the previous
     /// attempt timed out.
     pub(crate) last_timed_out: HashMap<NodeIndex, bool>,
+    /// Cumulative execution time in seconds for each node.
+    /// Used by [`RoutePolicyDef::MaxDuration`] to exit loops after a time
+    /// threshold.
+    pub(crate) cumulative_runtime_secs: HashMap<NodeIndex, u64>,
 }
 
 /// The graph scheduler that drives node execution via event handling.
 ///
-/// The scheduler implements the NODE_TRANSFER model:
+/// The scheduler implements the `NODE_TRANSFER` model:
 /// - Nodes emit events (complete, failed, timeout)
 /// - Events propagate through edges based on strategy (All/Any), threshold,
-///   exit_reason filters, and event type matching
+///   `exit_reason` filters, and event type matching
 /// - When an edge fires, the target node is enqueued for execution
 #[derive(Debug, Clone)]
 pub struct Scheduler {
@@ -151,6 +155,11 @@ impl Scheduler {
             .map(|idx| (idx, false))
             .collect();
 
+        let cumulative_runtime_secs: HashMap<NodeIndex, u64> = graph
+            .node_indices()
+            .map(|idx| (idx, 0))
+            .collect();
+
         let edge_states: Vec<EdgeState> = (0..graph.edge_count())
             .map(|_| EdgeState::default())
             .collect();
@@ -176,6 +185,7 @@ impl Scheduler {
                 ready_queue: VecDeque::new(),
                 fan_in_pending,
                 last_timed_out,
+                cumulative_runtime_secs,
             },
         }
     }
@@ -183,8 +193,8 @@ impl Scheduler {
     /// Update the emitting node's status and event counters based on an event.
     ///
     /// This is the **bookkeeping** side of event processing — it records what
-    /// happened to the node (Completed, Failed, TimedOut) and maintains per-event
-    /// counters. It is conceptually separate from f_v (the transfer function)
+    /// happened to the node (Completed, Failed, `TimedOut`) and maintains per-event
+    /// counters. It is conceptually separate from `f_v` (the transfer function)
     /// which determines which downstream nodes to trigger.
     fn apply_event_to_node_state(
         &mut self,
@@ -222,22 +232,22 @@ impl Scheduler {
         }
     }
 
-    /// Handle an event emitted by a node — implements f_v via
+    /// Handle an event emitted by a node — implements `f_v` via
     /// [`NodeTransfer::evaluate`].
     ///
     /// Processes the event through all outgoing edges of the given node.
     /// When an edge's conditions are satisfied (strategy, threshold,
-    /// exit_reason), the edge fires and the target node is returned in the
+    /// `exit_reason`), the edge fires and the target node is returned in the
     /// result vector.
     ///
     /// This method has two phases:
     /// 1. **Node bookkeeping**: update the emitting node's status & counters
     ///    ([`apply_event_to_node_state`]).
-    /// 2. **Transfer function f_v**: delegate to [`NodeTransfer::evaluate`]
-    ///    which implements the h_e + g_e decomposition.
+    /// 2. **Transfer function `f_v`**: delegate to [`NodeTransfer::evaluate`]
+    ///    which implements the `h_e` + `g_e` decomposition.
     ///
     /// Edges have no "triggered" state — every event independently evaluates
-    /// all matching edges (design philosophy: h_e is stateless).
+    /// all matching edges (design philosophy: `h_e` is stateless).
     ///
     /// # Returns
     ///
@@ -359,7 +369,7 @@ impl Scheduler {
     /// Check whether the graph execution has converged.
     ///
     /// Convergence means all nodes are in a terminal state (Completed, Failed,
-    /// TimedOut, or Skipped) and the ready queue is empty.
+    /// `TimedOut`, or Skipped) and the ready queue is empty.
     #[must_use]
     pub fn is_converged(&self) -> bool {
         if !self.state.ready_queue.is_empty() {
@@ -377,19 +387,111 @@ impl Scheduler {
 
     /// Get a reference to the graph definition.
     #[must_use]
-    pub fn graph(&self) -> &GraphDef {
+    pub const fn graph(&self) -> &GraphDef {
         &self.graph
     }
 
     /// Get a reference to the runtime state.
     #[must_use]
-    pub fn state(&self) -> &RuntimeState {
+    pub const fn state(&self) -> &RuntimeState {
         &self.state
     }
 
     /// Get a mutable reference to the runtime state.
-    pub fn state_mut(&mut self) -> &mut RuntimeState {
+    pub const fn state_mut(&mut self) -> &mut RuntimeState {
         &mut self.state
+    }
+
+    // ── Convenience accessors ──────────────────────────────
+    //
+    // These methods encapsulate common RuntimeState field accesses
+    // so that callers (notably the Engine) don't need to drill through
+    // `state().run_counts.get(...)` chains.  They also serve as the
+    // single point of truth for default values.
+
+    /// Get the current run count for a node (0 if never executed).
+    #[must_use]
+    pub fn node_run_count(&self, node_id: NodeIndex) -> u64 {
+        self.state.run_counts.get(&node_id).copied().unwrap_or(0)
+    }
+
+    /// Set the run count for a node.
+    pub fn set_node_run_count(&mut self, node_id: NodeIndex, count: u64) {
+        if let Some(c) = self.state.run_counts.get_mut(&node_id) {
+            *c = count;
+        }
+    }
+
+    /// Get the current status of a node.
+    #[must_use]
+    pub fn node_status(&self, node_id: NodeIndex) -> Option<NodeStatus> {
+        self.state.states.get(&node_id).map(|s| s.status)
+    }
+
+    /// Set the status of a node.  No-op if the node doesn't exist.
+    pub fn set_node_status(&mut self, node_id: NodeIndex, status: NodeStatus) {
+        if let Some(s) = self.state.states.get_mut(&node_id) {
+            s.status = status;
+        }
+    }
+
+    /// Returns `true` if the node is currently in the `Running` state.
+    #[must_use]
+    pub fn is_node_running(&self, node_id: NodeIndex) -> bool {
+        self.node_status(node_id) == Some(NodeStatus::Running)
+    }
+
+    /// Returns `true` if the node's most recent (non-retried) execution timed out.
+    #[must_use]
+    pub fn was_last_timed_out(&self, node_id: NodeIndex) -> bool {
+        self.state.last_timed_out.get(&node_id).copied().unwrap_or(false)
+    }
+
+    /// Record that the node's most recent execution timed out.
+    pub fn mark_last_timed_out(&mut self, node_id: NodeIndex) {
+        self.state.last_timed_out.insert(node_id, true);
+    }
+
+    /// Get the retry count for a node.
+    #[must_use]
+    pub fn node_retry_count(&self, node_id: NodeIndex) -> u64 {
+        self.state.retry_counts.get(&node_id).copied().unwrap_or(0)
+    }
+
+    /// Count how many nodes are currently in the `Running` state.
+    #[must_use]
+    pub fn running_count(&self) -> usize {
+        self.state
+            .states
+            .values()
+            .filter(|s| s.status == NodeStatus::Running)
+            .count()
+    }
+
+    /// Get the per-node `max_retries` from the graph, falling back to a default.
+    #[must_use]
+    pub fn node_max_retries(&self, node_id: NodeIndex, default: u64) -> u64 {
+        self.graph
+            .node_weight(node_id)
+            .and_then(|nd| nd.max_retries)
+            .unwrap_or(default)
+    }
+
+    /// Get the cumulative execution time for a node in seconds.
+    #[must_use]
+    pub fn cumulative_runtime_secs(&self, node_id: NodeIndex) -> u64 {
+        self.state
+            .cumulative_runtime_secs
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Add `elapsed_secs` to the node's cumulative execution time.
+    pub fn add_cumulative_runtime(&mut self, node_id: NodeIndex, elapsed_secs: u64) {
+        if let Some(c) = self.state.cumulative_runtime_secs.get_mut(&node_id) {
+            *c = c.saturating_add(elapsed_secs);
+        }
     }
 }
 
@@ -408,13 +510,13 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
 
         let mut index = HashMap::new();
@@ -466,19 +568,19 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let c = graph.add_node(NodeData {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
 
         let mut index = HashMap::new();
@@ -546,19 +648,19 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let c = graph.add_node(NodeData {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
 
         let mut index = HashMap::new();
@@ -670,19 +772,19 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let c = graph.add_node(NodeData {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
 
         let mut index = HashMap::new();
@@ -788,13 +890,13 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
 
         let mut index = HashMap::new();
@@ -869,13 +971,13 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
 
         let mut index = HashMap::new();
@@ -946,19 +1048,19 @@ mod tests {
             id: "A".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let b = graph.add_node(NodeData {
             id: "B".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
         let c = graph.add_node(NodeData {
             id: "C".into(),
             providers: vec![],
             process_timeout_secs: 10,
-            route_policy: None, max_retries: None,
+            route_policy: None, max_retries: None, scripts_dir: None,
         });
 
         let mut index = HashMap::new();
@@ -1377,10 +1479,10 @@ mod tests {
         // A → B (Any, Complete), B → A (Any, Complete)
         let mut graph = StableDiGraph::new();
         let a = graph.add_node(NodeData {
-            id: "A".into(), providers: vec![], process_timeout_secs: 10, route_policy: None, max_retries: None,
+            id: "A".into(), providers: vec![], process_timeout_secs: 10, route_policy: None, max_retries: None, scripts_dir: None,
         });
         let b = graph.add_node(NodeData {
-            id: "B".into(), providers: vec![], process_timeout_secs: 10, route_policy: None, max_retries: None,
+            id: "B".into(), providers: vec![], process_timeout_secs: 10, route_policy: None, max_retries: None, scripts_dir: None,
         });
         let mut index = HashMap::new();
         index.insert("A".into(), a);

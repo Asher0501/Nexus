@@ -1,0 +1,200 @@
+{
+  "main": {
+    "id": "497481fca5737db2",
+    "type": "split",
+    "children": [
+      {
+        "id": "6a4559dd2e0605b1",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "161973b1a337c68a",
+            "type": "leaf",
+            "state": {
+              "type": "empty",
+              "state": {},
+              "icon": "lucide-file",
+              "title": "New tab"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "5530a3fe9724d07f",
+    "type": "split",
+    "children": [
+      {
+        "id": "286835802cabb538",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "bf5dca9485e2fe9e",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "1f7754f7b2cf84ca",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "a93d6d4776e91287",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "9a7bf3202810b5ce",
+    "type": "split",
+    "children": [
+      {
+        "id": "ca161a44b83cf2c9",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "457692158dc17746",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "review_records/fix_transfer_log.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for fix_transfer_log"
+            }
+          },
+          {
+            "id": "91afd507393024b3",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "review_records/fix_transfer_log.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from fix_transfer_log"
+            }
+          },
+          {
+            "id": "3af8408eb39c1480",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "99496bf93ee5a2a1",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "f4148103270b10d8",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "review_records/fix_transfer_log.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of fix_transfer_log"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "161973b1a337c68a",
+  "lastOpenFiles": [
+    "analysis_report.md",
+    "save_report.py",
+    "save_report.py.tmp.21708.47823673acab",
+    "fix_task.md",
+    "fix_task.md.tmp.21708.fa0c1dc07b45",
+    "review_task.md",
+    "review_task.md.tmp.21708.1dc3eb3a2f4c",
+    "self-supervised-doc-review-fix.json",
+    "self-supervised-doc-review-fix.json.tmp.21708.23cceaf08c0a",
+    "review_records/fix_transfer_log.md",
+    "loop_analysis.md.tmp.13720.386cbc563995",
+    "loop_analysis.md",
+    "loop_analysis.md.tmp.13720.ab038ebf0d6f",
+    "review_records/fix_readme_log.md",
+    "review_records/fix_design_log.md"
+  ]
+}

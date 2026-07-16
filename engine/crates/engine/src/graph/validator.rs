@@ -22,7 +22,7 @@ use petgraph::graph::DiGraph;
 
 use crate::model::predecessor::SchedulingEdgeDef;
 use crate::model::workflow::{NodeDef, WorkflowDef};
-use crate::model::ValidationError;
+use crate::model::{ValidationError, ValidationWarning};
 
 /// Validate a [`WorkflowDef`] against all nine structural checks.
 ///
@@ -32,6 +32,7 @@ use crate::model::ValidationError;
 /// # Errors
 ///
 /// Returns a vector of [`ValidationError`] describing every detected problem.
+#[allow(clippy::too_many_lines)]
 pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
     let mut errors: Vec<ValidationError> = Vec::new();
 
@@ -74,6 +75,38 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
         }
     }
 
+    // 7c. LlmNodeMissingWrapper — type=llm nodes must have llm_node.py
+    //     reachable via their resolved scripts_dir.  Mirrors the engine's
+    //     resolution chain: CWD → exe-relative → common fallbacks.
+    for node in &def.nodes {
+        let has_llm = node.providers.iter().any(|p| {
+            matches!(p, crate::model::provider::ProviderDef::Llm { .. })
+        });
+        if !has_llm {
+            continue;
+        }
+        let sd = node.scripts_dir.as_deref()
+            .or(def.scripts_dir.as_deref())
+            .unwrap_or("./scripts");
+
+        let found = {
+            let cwd = std::path::PathBuf::from(sd).join("llm_node.py");
+            let exe_rel = std::env::current_exe().ok().and_then(|exe| {
+                let base = exe.parent()?.parent()?; // bin/ → release/
+                Some(base.join(sd).join("llm_node.py"))
+            }).unwrap_or_else(|| cwd.clone());
+            let alt = std::path::PathBuf::from("release").join(sd).join("llm_node.py");
+            cwd.exists() || exe_rel.exists() || alt.exists()
+        };
+
+        if !found {
+            errors.push(ValidationError::LlmNodeMissingWrapper {
+                node_id: node.id.clone(),
+                scripts_dir: sd.to_string(),
+            });
+        }
+    }
+
     // Build a set of all node IDs for quick lookup.
     let all_node_ids: HashSet<&str> =
         def.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -96,10 +129,10 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
     // Build shared child_map and reachable set for all reachability checks.
     // This avoids building the same adjacency map 3 times across 4/6/9.
     let child_map: HashMap<&str, Vec<&str>> = build_child_map(&def.edges);
-    let reachable: HashSet<&str> = if !entry_ids.is_empty() {
-        bfs_from(entry_ids.as_slice(), &child_map)
-    } else {
+    let reachable: HashSet<&str> = if entry_ids.is_empty() {
         HashSet::new()
+    } else {
+        bfs_from(entry_ids.as_slice(), &child_map)
     };
 
     // 4. UnreachableNode
@@ -144,7 +177,7 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
     }
 
     // 6. CycleWithoutEntry (reuses `reachable` from above)
-    if find_cycle_without_entry(&def.nodes, &def.edges.as_slice(), &reachable).is_some() {
+    if find_cycle_without_entry(&def.nodes, def.edges.as_slice(), &reachable).is_some() {
         errors.push(ValidationError::CycleWithoutEntry);
     }
 
@@ -289,7 +322,7 @@ pub fn validate(def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
 }
 
 /// Build a child-adjacency map from scheduling edges: node → [children].
-fn build_child_map<'a>(edges: &'a [SchedulingEdgeDef]) -> HashMap<&'a str, Vec<&'a str>> {
+fn build_child_map(edges: &[SchedulingEdgeDef]) -> HashMap<&str, Vec<&str>> {
     let mut child_map: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
         child_map
@@ -391,6 +424,80 @@ fn find_cycle_without_entry<'a>(
     None
 }
 
+/// Validate a [`WorkflowDef`] for advisory warnings.
+///
+/// Unlike [`validate`], warnings do NOT block execution. They flag common
+/// configuration pitfalls that may cause runtime issues (e.g. missing
+/// streaming output, multi-line prompts on Windows).
+///
+/// Returns a vector of [`ValidationWarning`] — empty means no warnings.
+#[must_use]
+pub fn validate_warnings(def: &WorkflowDef) -> Vec<ValidationWarning> {
+    let mut warnings: Vec<ValidationWarning> = Vec::new();
+
+    // Collect node-id → NodeDef for lookups
+    let _id_to_node: HashMap<&str, &NodeDef> =
+        def.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+
+    for node in &def.nodes {
+        for provider in &node.providers {
+            if let crate::model::provider::ProviderDef::Llm { command, prompt, .. } = provider {
+                // Warn: -p "{{prompt}}" + multi-line prompt → breaks on Windows
+                if (command.contains("-p \"{{prompt}}\"") || command.contains("-p '{{prompt}}'"))
+                    && prompt.as_ref().is_some_and(|p| p.contains('\n'))
+                {
+                    warnings.push(ValidationWarning::LlmPromptInCommandLine {
+                        node_id: node.id.clone(),
+                    });
+                }
+
+                // Warn: --output-format json without stream-json → no chunks
+                if command.contains("--output-format json")
+                    && !command.contains("stream-json")
+                {
+                    warnings.push(ValidationWarning::LlmNoStreamingOutput {
+                        node_id: node.id.clone(),
+                    });
+                }
+            }
+        }
+
+        // Warn: suspicious scripts_dir (redundant path segments when resolved)
+        let sd = node.scripts_dir.as_deref()
+            .or(def.scripts_dir.as_deref())
+            .unwrap_or("");
+        if !sd.is_empty() {
+            let resolved = std::path::PathBuf::from(sd);
+            let resolved_str = if resolved.is_absolute() {
+                resolved.to_string_lossy().to_string()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_default()
+                    .join(&resolved)
+                    .to_string_lossy()
+                    .to_string()
+            };
+            let segments: Vec<&str> = resolved_str
+                .split(['/', '\\'])
+                .filter(|s| !s.is_empty() && *s != ".")
+                .collect();
+            let mut counts = std::collections::HashMap::new();
+            for s in &segments {
+                *counts.entry(*s).or_insert(0) += 1;
+            }
+            if counts.values().any(|&c| c > 1) {
+                warnings.push(ValidationWarning::SuspiciousScriptsDir {
+                    node_id: node.id.clone(),
+                    scripts_dir: sd.to_string(),
+                    resolved: resolved_str,
+                });
+            }
+        }
+    }
+
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,7 +512,7 @@ mod tests {
         }],
         process_timeout_secs: 10,
         returns: vec![],
-        max_retries: None, route_policy: None }
+        max_retries: None, route_policy: None, scripts_dir: None }
     }
 
     fn make_node_with_providers(id: &str, providers: Vec<ProviderDef>) -> NodeDef {
@@ -432,6 +539,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(result.is_err(), "empty graph should fail validation");
@@ -449,6 +557,7 @@ mod tests {
             nodes: vec![make_node("a"), make_node("a")],
             edges: vec![],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
@@ -470,6 +579,7 @@ mod tests {
             nodes: vec![make_node("a"), make_node("b")],
             edges: vec![sched_edge("a", "b"), sched_edge("b", "a")],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
@@ -493,6 +603,7 @@ mod tests {
                 sched_edge("c", "d"),
             ],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
@@ -533,6 +644,7 @@ mod tests {
                 },
             ],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
@@ -555,6 +667,7 @@ mod tests {
             nodes: vec![make_node("a"), make_node("b")],
             edges: vec![sched_edge("a", "b"), sched_edge("b", "a")],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
@@ -573,6 +686,7 @@ mod tests {
             nodes: vec![make_node_with_providers("a", vec![])],
             edges: vec![],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
@@ -597,6 +711,7 @@ mod tests {
                 to: "b".into(),
                 alias: None,
             }],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
@@ -633,6 +748,7 @@ mod tests {
                 to: "d".into(),
                 alias: None,
             }],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
@@ -657,12 +773,12 @@ mod tests {
             nodes: vec![make_node("a"), make_node("b")],
             edges: vec![sched_edge("a", "b")],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
             result.is_ok(),
-            "valid chain should pass validation: {:?}",
-            result
+            "valid chain should pass validation: {result:?}"
         );
     }
 
@@ -672,12 +788,12 @@ mod tests {
             nodes: vec![make_node("a"), make_node("b"), make_node("c")],
             edges: vec![sched_edge("a", "c"), sched_edge("b", "c")],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
             result.is_ok(),
-            "valid fan-in should pass validation: {:?}",
-            result
+            "valid fan-in should pass validation: {result:?}"
         );
     }
 
@@ -687,12 +803,12 @@ mod tests {
             nodes: vec![make_node("a")],
             edges: vec![],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
             result.is_ok(),
-            "single node should pass validation: {:?}",
-            result
+            "single node should pass validation: {result:?}"
         );
     }
 
@@ -703,12 +819,12 @@ mod tests {
             nodes: vec![make_node("a"), make_node("b")],
             edges: vec![],
             dataflows: vec![],
+            scripts_dir: None,
         };
         let result = validate(&def);
         assert!(
             result.is_ok(),
-            "two isolated nodes should pass: {:?}",
-            result
+            "two isolated nodes should pass: {result:?}"
         );
     }
 }

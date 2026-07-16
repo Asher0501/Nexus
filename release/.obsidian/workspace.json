@@ -1,0 +1,225 @@
+{
+  "main": {
+    "id": "0b3669fe29f86415",
+    "type": "split",
+    "children": [
+      {
+        "id": "b43791d58b2cd133",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "836cd995d3f42f77",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "NEXUS_WORKFLOW_SKILL.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "NEXUS_WORKFLOW_SKILL"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "a0b594f0a329b597",
+    "type": "split",
+    "children": [
+      {
+        "id": "eb00ba21705d66ba",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "4e024bcddf07860e",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "3c3e1c5c36467f39",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "5c71cdd604f8a59c",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "5cc006a0c02de78c",
+    "type": "split",
+    "children": [
+      {
+        "id": "7e6dd58ea6ff7fdf",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "a6d4ed9a265e30ec",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "scripts/review_doc.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for review_doc"
+            }
+          },
+          {
+            "id": "9891478cedda766e",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "scripts/review_doc.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from review_doc"
+            }
+          },
+          {
+            "id": "e9664689eebe5f0a",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "14d21a1dd48ac48d",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "d5b353523a34bbfe",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "scripts/review_doc.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of review_doc"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "836cd995d3f42f77",
+  "lastOpenFiles": [
+    "log/run-6a9250b7-7e0b-4198-8882-b63900505c11.log",
+    "log/run-e972382f-5e59-41d8-acb7-c4fa9a577d4d.log",
+    "CODE_REVIEW_REPORT.md",
+    "WORKFLOW_REFERENCE.md.tmp.21708.fdff0aecef30",
+    "DESIGN_PRINCIPLES.md",
+    "DESIGN_PRINCIPLES.md.tmp.21708.b5bc1de78175",
+    "NEXUS_WORKFLOW_SKILL.md.tmp.21708.9b9c4ba3e4c5",
+    "tmp/code_fix_task.md",
+    "tmp/code_review_task.md",
+    "review_doc.md",
+    "log/run-32395b77-70d9-47d6-8be0-e52aea859cff.log",
+    "tmp/code_fix_task.md.tmp.21708.8c82e089aea8",
+    "tmp/code_review_task.md.tmp.21708.3b164a116c60",
+    "tmp/code-review.json.tmp.21708.6c44590f7ab0",
+    "tmp/code-review.json.tmp.21708.ce1678e177ad",
+    "review_doc.md.tmp.20516.686f2d6726e2",
+    "scripts/review_doc.md",
+    "NEXUS_WORKFLOW_SKILL.md",
+    "SELF_SUPERVISED_FIX_REPORT.md",
+    "WORKFLOW_REFERENCE.md",
+    "tmp/review_task.md",
+    "tmp/review_records/round1_01_review_readme.md",
+    "tmp/review_records/round1_02_review_design.md",
+    "tmp/review_records/round{{metadata.run_count}}_03_review_transfer.md",
+    "tmp/review_records/fix_transfer_log.md",
+    "tmp/review_records/fix_readme_log.md",
+    "tmp/review_records/fix_design_log.md",
+    "tmp/review_records/final_summary.md",
+    "tmp/review_records/review_readme.md",
+    "tmp/review_records/review_transfer.md",
+    "tmp/review_records/review_design.md",
+    "tmp/review_records/review_cross.md",
+    "tmp/review_records/merge_plan.md",
+    "tmp/review_records/judge_evaluation.md",
+    "tmp/loop_analysis.md",
+    "tmp/fix_task.md"
+  ]
+}

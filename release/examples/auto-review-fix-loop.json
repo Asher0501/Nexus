@@ -1,0 +1,69 @@
+{
+  "nodes": [
+    {
+      "id": "seed",
+      "providers": [{
+        "type": "shell",
+        "command": "echo fn divide(a:i32,b:i32)->i32{a/b}"
+      }],
+      "process_timeout_secs": 10
+    },
+
+    {
+      "id": "review",
+      "providers": [{
+        "type": "llm_sdk",
+        "model": "claude-sonnet-5-20251001",
+        "system_prompt": "You are a senior code reviewer. Find ALL bugs, security issues, edge cases, and design flaws. Be thorough. If you find ANY issue, route 'needs_fix'. Only route 'approved' if the code is truly perfect. This is round {{metadata.run_count}} of review.",
+        "prompt": "REVIEW this code:\n\n{{datarouter.seed.content}}{{datarouter.fixed_code.content}}\n\nIf {{metadata.run_count}} > 1, also check whether the previous fix was properly applied.\n\nOutput ONLY a single-line JSON:\n{\"route\":\"needs_fix|approved\",\"content\":\"findings\"}",
+        "routes": ["needs_fix", "approved"],
+        "max_tokens": 4096
+      }],
+      "process_timeout_secs": 600,
+      "route_policy": {
+        "type": "max_runs",
+        "max": 4,
+        "then_route": "approved"
+      }
+    },
+
+    {
+      "id": "fix",
+      "providers": [{
+        "type": "llm_sdk",
+        "model": "claude-sonnet-5-20251001",
+        "system_prompt": "You are a code fixer. Apply ALL fixes precisely. Output only the corrected code. Do not add comments or explanations beyond the code itself.",
+        "prompt": "FIX the issues found below. Output the complete corrected code.\n\nREVIEW FINDINGS:\n{{datarouter.review.content}}\n\nORIGINAL CODE:\n{{datarouter.seed.content}}{{datarouter.fixed_code.content}}\n\nOutput ONLY:\n{\"route\":\"done\",\"content\":\"the fully corrected code\"}",
+        "routes": ["done"],
+        "max_tokens": 4096
+      }],
+      "process_timeout_secs": 600
+    },
+
+    {
+      "id": "report",
+      "providers": [{
+        "type": "shell",
+        "command": "python -c \"import json,sys; d=json.load(sys.stdin); i=d['inputs']; print(json.dumps({'route':'ok','content':f'FINAL REVIEW: {i.get(chr(114)+chr(101)+chr(118)+chr(105)+chr(101)+chr(119),chr(63))[:300]}'}))\""
+      }],
+      "process_timeout_secs": 10
+    }
+  ],
+
+  "edges": [
+    {"from": "seed",   "to": "review", "trigger": "any", "event": "complete"},
+
+    {"from": "review", "to": "fix",    "trigger": "any", "event": "complete", "exit_reason": "needs_fix"},
+    {"from": "fix",    "to": "review", "trigger": "any", "event": "complete"},
+
+    {"from": "review", "to": "report", "trigger": "any", "event": "complete", "exit_reason": "approved"}
+  ],
+
+  "dataflows": [
+    {"from": "seed",   "to": "review"},
+    {"from": "fix",    "to": "review",  "alias": "fixed_code"},
+    {"from": "seed",   "to": "fix"},
+    {"from": "review", "to": "fix"},
+    {"from": "review", "to": "report"}
+  ]
+}

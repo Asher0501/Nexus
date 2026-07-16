@@ -1,0 +1,37 @@
+{
+  "nodes": [
+    {
+      "id": "worker",
+      "providers": [{
+        "type": "shell",
+        "command": "python -c \"import time,json; time.sleep(2); print(json.dumps({'route':'still_working','content':'did some work'}))\""
+      }],
+      "process_timeout_secs": 10,
+      "route_policy": {
+        "type": "max_duration",
+        "max_secs": 1,
+        "then_route": "timeout_exit"
+      }
+    },
+    {
+      "id": "on_timeout",
+      "providers": [{
+        "type": "shell",
+        "command": "python -c \"import json; print(json.dumps({'route':'ok','content':'timeout policy triggered! route overridden to timeout_exit'}))\""
+      }],
+      "process_timeout_secs": 5
+    },
+    {
+      "id": "on_still_working",
+      "providers": [{
+        "type": "shell",
+        "command": "python -c \"import json; print(json.dumps({'route':'ok','content':'still working - max_duration NOT triggered'}))\""
+      }],
+      "process_timeout_secs": 5
+    }
+  ],
+  "edges": [
+    { "from": "worker", "to": "on_timeout",        "trigger": "any", "event": "complete", "exit_reason": "timeout_exit" },
+    { "from": "worker", "to": "on_still_working",  "trigger": "any", "event": "complete", "exit_reason": "still_working" }
+  ]
+}

@@ -1,17 +1,17 @@
 //! WebSocket integration tests for nexus-dashboard.
 //!
 //! Each test spawns a fresh server on a random port, establishes a real WS
-//! connection to `/ws/runs/{run_id}`, broadcasts messages through the WsRoom,
+//! connection to `/ws/runs/{run_id}`, broadcasts messages through the `WsRoom`,
 //! and verifies the client receives correctly-formatted JSON messages.
 //!
 //! Tests covered:
-//!   WS-1  Connect and receive node_status broadcast
-//!   WS-2  Connect and receive node_chunk broadcast
+//!   WS-1  Connect and receive `node_status` broadcast
+//!   WS-2  Connect and receive `node_chunk` broadcast
 //!   WS-3  Connect and receive snapshot broadcast
-//!   WS-4  Connect and receive workflow_done broadcast
+//!   WS-4  Connect and receive `workflow_done` broadcast
 //!   WS-5  Connect and receive error broadcast
 //!   WS-6  Multiple clients in same room all receive broadcasts
-//!   WS-7  Different run_ids are isolated
+//!   WS-7  Different `run_ids` are isolated
 //!   WS-8  Client disconnect does not affect other clients
 //!   WS-9  Connect and receive all message types round-trip
 
@@ -44,7 +44,7 @@ use tower_http::cors::CorsLayer;
 
 use nexus_dashboard::{api, db::Store, state::AppState, ws, ws::WsRoom};
 
-/// Helper: start a test server, return (base_url, store, room).
+/// Helper: start a test server, return (`base_url`, store, room).
 async fn spawn_server() -> (String, Store, Arc<WsRoom>) {
     let dir = std::env::temp_dir().join(format!("nexus-int-ws-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).ok();
@@ -77,7 +77,7 @@ async fn spawn_server() -> (String, Store, Arc<WsRoom>) {
     (base_url, store, room)
 }
 
-/// Connect a WS client to the given run_id and return the stream.
+/// Connect a WS client to the given `run_id` and return the stream.
 async fn ws_connect(base_url: &str, run_id: &str) -> impl futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin {
     let ws_url = base_url.replace("http://", "ws://");
     let (ws_stream, _) = connect_async(format!("{ws_url}/ws/runs/{run_id}"))

@@ -14,12 +14,13 @@ use crate::ws::WsRoom;
 pub struct AppState {
     pub store: Store,
     pub room: Arc<WsRoom>,
-    /// Cancel flags for running workflows, keyed by run_id.
+    /// Cancel flags for running workflows, keyed by `run_id`.
     pub cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 impl AppState {
-    /// Register a cancel flag for a run_id.
+    /// Register a cancel flag for a `run_id`.
+    #[must_use]
     pub fn register_cancel(&self, run_id: &str) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
         self.cancel_flags
@@ -30,6 +31,7 @@ impl AppState {
     }
 
     /// Cancel a running workflow and remove its flag.
+    #[must_use]
     pub fn cancel_run(&self, run_id: &str) -> bool {
         if let Some(flag) = self.cancel_flags.lock().unwrap().remove(run_id) {
             flag.store(true, Ordering::Relaxed);

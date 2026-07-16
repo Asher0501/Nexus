@@ -28,7 +28,7 @@ pub use predecessor::{
     default_threshold, DataFlowDef, EventType, SchedulingEdgeDef, TriggerExpr,
 };
 pub use config::EngineConfig;
-pub use error::ValidationError;
+pub use error::{ValidationError, ValidationWarning};
 
 #[cfg(test)]
 mod tests {
@@ -121,7 +121,7 @@ mod tests {
         assert!(!err.to_string().is_empty());
 
         let err = ValidationError::DuplicateNodeId { node_id: "x".into() };
-        assert!(err.to_string().contains("x"));
+        assert!(err.to_string().contains('x'));
     }
 
     #[test]
@@ -314,7 +314,7 @@ mod tests {
 
         // 验证 HTTP provider
         match &node.providers[1] {
-            ProviderDef::Http { url, method } => {
+            ProviderDef::Http { url, method, .. } => {
                 assert_eq!(url, "http://api.example.com");
                 assert_eq!(method.as_deref(), Some("POST"));
             }
@@ -376,6 +376,8 @@ mod tests {
             ProviderDef::Http {
                 url: "https://example.com/api".into(),
                 method: Some("GET".into()),
+                headers: None,
+                body: None,
             }
         );
 
@@ -418,6 +420,8 @@ mod tests {
             ProviderDef::Http {
                 url: "https://example.com/api".into(),
                 method: None,
+                headers: None,
+                body: None,
             }
         );
     }
@@ -442,7 +446,7 @@ mod tests {
 
         for (i, err) in cases.iter().enumerate() {
             let msg = err.to_string();
-            assert!(!msg.is_empty(), "ValidationError variant {} display should not be empty", i);
+            assert!(!msg.is_empty(), "ValidationError variant {i} display should not be empty");
             // Verify Error trait is implemented
             let _: &dyn std::error::Error = err;
         }
@@ -467,5 +471,23 @@ mod tests {
         assert_eq!(edge.event, EventType::Failed);
         assert_eq!(edge.exit_reason.as_deref(), Some("crash"));
         assert_eq!(edge.threshold, 3);
+    }
+
+    #[test]
+    fn test_route_policy_max_duration_roundtrip() {
+        let json = r#"{"type":"max_duration","max_secs":300,"then_route":"timeout_exit"}"#;
+        let policy: RoutePolicyDef =
+            serde_json::from_str(json).expect("max_duration should parse");
+        assert_eq!(
+            policy,
+            RoutePolicyDef::MaxDuration {
+                max_secs: 300,
+                then_route: "timeout_exit".into(),
+            }
+        );
+        let serialized = serde_json::to_string(&policy).expect("serialize");
+        let recovered: RoutePolicyDef =
+            serde_json::from_str(&serialized).expect("roundtrip");
+        assert_eq!(policy, recovered);
     }
 }

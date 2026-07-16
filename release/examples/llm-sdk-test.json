@@ -1,0 +1,20 @@
+{
+  "nodes": [
+    {
+      "id": "test_sdk",
+      "providers": [
+        {
+          "type": "llm_sdk",
+          "model": "deepseek-v4-pro[1m]",
+          "prompt": "Output EXACTLY this JSON and nothing else:\n{\"route\":\"ok\",\"content\":\"Hello from Nexus llm_sdk! The SDK integration works correctly.\"}",
+          "routes": ["ok", "error"],
+          "max_tokens": 256
+        }
+      ],
+      "process_timeout_secs": 60,
+      "returns": ["ok", "error"]
+    }
+  ],
+  "edges": [],
+  "dataflows": []
+}

@@ -1,0 +1,67 @@
+{
+  "nodes": [
+    {
+      "id": "seed",
+      "providers": [{
+        "type": "subprocess",
+        "command": "python -c __import__('sys').stdout.write(bytes.fromhex('7b22726f757465223a226f6b222c22636f6e74656e74223a222e2e2f64657369676e2f68756d616e2d696e2d7468652d6c6f6f702f4f5054494d495a45442e6d64227d').decode())"
+      }],
+      "process_timeout_secs": 10
+    },
+
+    {
+      "id": "review_design",
+      "providers": [{
+        "type": "llm_sdk",
+        "model": "claude-sonnet-5-20251001",
+        "system_prompt": "你是一位首席软件架构师，正在审查一份系统设计方案。从以下维度严格找出所有缺陷：正确性、安全性、健壮性、用户体验、性能、实现复杂度。假设一切都有问题，直到被证明无误。这是第 {{metadata.run_count}} 轮审查。",
+        "prompt": "审查设计文档，路径：{{datarouter.seed.content}}\n\n用 Read 工具读取该文件及其所在目录下的所有相关设计文档，然后进行全面审查。\n\n如果上一轮有修复（{{datarouter.fixed_design.content}}），验证那些修复是否正确应用。\n\n仅输出单行 JSON：\n{\"route\":\"needs_fix|approved\",\"content\":\"详细审查意见。每个问题标注严重级别（P0致命/P1重要/P2建议）和修复方案。如果通过，说明为什么设计已经完善。\"}",
+        "routes": ["needs_fix", "approved"],
+        "max_tokens": 8192
+      }],
+      "process_timeout_secs": 900,
+      "route_policy": {
+        "type": "max_runs",
+        "max": 4,
+        "then_route": "approved"
+      }
+    },
+
+    {
+      "id": "final_summary",
+      "providers": [{
+        "type": "subprocess",
+        "command": "python -c __import__('sys').stdout.write(bytes.fromhex('7b22726f757465223a226f6b222c22636f6e74656e74223a22e8aebee8aea1e5aea1e69fa5e5b7b2e5ae8ce68890222c22e68f90e4baa4223a22e69fa5e79c8b64657369676e2fe4b88be79a84e69687e4bbb6227d').decode())"
+      }],
+      "process_timeout_secs": 10
+    },
+
+    {
+      "id": "fix_design",
+      "providers": [{
+        "type": "llm_sdk",
+        "model": "claude-sonnet-5-20251001",
+        "system_prompt": "你是一位资深系统架构师。严格按照审查意见修复设计文档。用 Write 工具写出完整的修正后文档——不要只描述改动，要写出完整的文件。确保修复精准，不引入新问题。",
+        "prompt": "修复设计文档，路径：{{datarouter.seed.content}}\n\n用 Read 工具读取当前文档，然后根据以下审查意见逐一修复所有问题。修复后用 Write 工具写入完整的修正文档。\n\n审查意见：\n{{datarouter.review_design.content}}\n\n写完文件后，仅输出单行 JSON：\n{\"route\":\"done\",\"content\":\"本轮修改摘要\"}",
+        "routes": ["done"],
+        "max_tokens": 8192
+      }],
+      "process_timeout_secs": 900
+    }
+  ],
+
+  "edges": [
+    {"from": "seed",          "to": "review_design", "trigger": "any", "event": "complete"},
+    {"from": "review_design", "to": "fix_design",    "trigger": "any", "event": "complete", "exit_reason": "needs_fix"},
+    {"from": "fix_design",    "to": "review_design", "trigger": "any", "event": "complete"},
+    {"from": "review_design", "to": "final_summary", "trigger": "any", "event": "complete", "exit_reason": "approved"}
+  ],
+
+  "dataflows": [
+    {"from": "seed",          "to": "review_design"},
+    {"from": "seed",          "to": "fix_design"},
+    {"from": "review_design", "to": "fix_design"},
+    {"from": "fix_design",    "to": "review_design", "alias": "fixed_design"},
+    {"from": "review_design", "to": "final_summary"}
+  ]
+}

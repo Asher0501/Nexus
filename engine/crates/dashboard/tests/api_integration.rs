@@ -14,13 +14,13 @@
 //!   API-7  GET    /api/workflows/{id}/run
 //!   API-8  POST   /api/workflows/{id}/run
 //!   API-9  GET    /api/runs
-//!   API-10 GET    /api/runs/{run_id}
-//!   API-11 POST   /api/runs/{run_id}/stop
-//!   API-12 GET    /api/runs/{run_id}/graph
+//!   API-10 GET    /`api/runs/{run_id`}
+//!   API-11 POST   /`api/runs/{run_id}/stop`
+//!   API-12 GET    /`api/runs/{run_id}/graph`
 //!   API-13 GET    /api/workflows (empty list)
 //!   API-14 POST   /api/workflows (duplicate id via same body — should succeed with new id)
 //!   API-15 GET    /api/workflows/{id} (not found)
-//!   API-16 PUT    /api/workflows/{id} (not found — SQLite UPDATE succeeds with 0 rows)
+//!   API-16 PUT    /api/workflows/{id} (not found — `SQLite` UPDATE succeeds with 0 rows)
 //!   API-17 DELETE /api/workflows/{id} (not found)
 
 #![allow(missing_docs)]
@@ -478,7 +478,7 @@ async fn api_14_create_multiple() {
         .await
         .expect("list");
     let list: serde_json::Value = list_resp.json().await.expect("parse list");
-    assert_eq!(list.as_array().map_or(0, |a| a.len()), 2, "should have 2 workflows");
+    assert_eq!(list.as_array().map_or(0, std::vec::Vec::len), 2, "should have 2 workflows");
 }
 
 // ---------------------------------------------------------------------------
@@ -539,4 +539,95 @@ async fn api_17_delete_not_found() {
     assert_eq!(resp.status(), 200);
     let val: serde_json::Value = resp.json().await.expect("parse response");
     assert_eq!(val["status"], "deleted");
+}
+
+// ── API-18: Graph endpoint includes trigger + threshold ──────
+
+#[tokio::test]
+async fn api_18_graph_includes_trigger_and_threshold() {
+    let (base_url, _store, _room) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "name": "graph-edge-fields",
+        "definition": {
+            "nodes": [
+                {"id":"A","providers":[{"type":"subprocess","command":"echo a"}],"process_timeout_secs":10},
+                {"id":"B","providers":[{"type":"subprocess","command":"echo b"}],"process_timeout_secs":10}
+            ],
+            "edges": [
+                {"from":"A","to":"B","trigger":"all","event":"complete","exit_reason":"ok","threshold":2}
+            ]
+        }
+    });
+    let resp = client.post(format!("{base_url}/api/workflows")).json(&body).send().await.expect("create");
+    let created: serde_json::Value = resp.json().await.expect("parse");
+    let id = created["id"].as_str().expect("id");
+
+    let graph: serde_json::Value = client
+        .get(format!("{base_url}/api/workflows/{id}/graph"))
+        .send().await.expect("graph").json().await.expect("parse");
+    let edges = graph["edges"].as_array().expect("edges");
+    assert_eq!(edges.len(), 1);
+    let e = &edges[0];
+    assert_eq!(e["trigger"], "all");
+    assert_eq!(e["threshold"], 2);
+    assert!(e["label"].as_str().unwrap().starts_with("all/"));
+}
+
+// ── API-19: route_policy MaxDuration roundtrip ────────────────
+
+#[tokio::test]
+async fn api_19_route_policy_max_duration_roundtrip() {
+    let (base_url, _store, _room) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "name": "max-duration-rp",
+        "definition": {
+            "nodes": [{
+                "id":"w","providers":[{"type":"subprocess","command":"echo x"}],
+                "process_timeout_secs":60,
+                "route_policy":{"type":"max_duration","max_secs":300,"then_route":"timeout_exit"}
+            }],
+            "edges":[]
+        }
+    });
+    let resp = client.post(format!("{base_url}/api/workflows")).json(&body).send().await.expect("create");
+    let id = resp.json::<serde_json::Value>().await.expect("parse")["id"].as_str().unwrap().to_string();
+
+    let wf: serde_json::Value = client.get(format!("{base_url}/api/workflows/{id}"))
+        .send().await.expect("get").json().await.expect("parse");
+    let def = match &wf["definition"] {
+        serde_json::Value::String(s) => serde_json::from_str(s).expect("parse def str"),
+        other => other.clone(),
+    };
+    let rp = &def["nodes"][0]["route_policy"];
+    assert_eq!(rp["type"], "max_duration");
+    assert_eq!(rp["max_secs"], 300);
+    assert_eq!(rp["then_route"], "timeout_exit");
+}
+
+// ── API-20: HTTP provider workflow Roundtrip ──────────────────
+
+#[tokio::test]
+async fn api_20_http_provider_workflow_roundtrip() {
+    let (base_url, _store, _room) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "name": "http-provider-test",
+        "definition": {
+            "nodes": [{
+                "id":"call","providers":[{
+                    "type":"http","url":"https://example.com/api",
+                    "method":"POST","headers":{"X-Key":"v"},"body":"{}"
+                }],"process_timeout_secs":15
+            }],
+            "edges":[]
+        }
+    });
+    let resp = client.post(format!("{base_url}/api/workflows")).json(&body).send().await.expect("create");
+    let id = resp.json::<serde_json::Value>().await.expect("parse")["id"].as_str().unwrap().to_string();
+
+    let graph: serde_json::Value = client.get(format!("{base_url}/api/workflows/{id}/graph"))
+        .send().await.expect("graph").json().await.expect("parse");
+    assert_eq!(graph["nodes"].as_array().unwrap().len(), 1);
 }

@@ -74,7 +74,8 @@ impl ServerMessage {
         })
     }
 
-    pub fn snapshot(
+    #[must_use]
+    pub const fn snapshot(
         running_count: usize,
         elapsed_secs: u64,
         nodes: HashMap<String, String>,
@@ -132,6 +133,7 @@ pub struct WsRoom {
 
 impl WsRoom {
     /// Create a new shared room manager.
+    #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             rooms: Mutex::new(HashMap::new()),

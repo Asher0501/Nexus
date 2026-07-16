@@ -78,17 +78,23 @@ async fn handle_validate(params: &Value, id: &Value) -> Value {
 
     let def: Result<WorkflowDef, _> = serde_json::from_str(&json_str);
     match def {
-        Ok(wf) => match validate(&wf) {
-            Ok(()) => make_success(
-                serde_json::json!({"valid": true, "errors": []}),
-                id.clone(),
-            ),
-            Err(errors) => {
-                let err_strs: Vec<String> = errors.iter().map(std::string::ToString::to_string).collect();
-                make_success(
-                    serde_json::json!({"valid": false, "errors": err_strs}),
+        Ok(wf) => {
+            let warnings: Vec<String> = nexus_engine::graph::validate_warnings(&wf)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
+            match validate(&wf) {
+                Ok(()) => make_success(
+                    serde_json::json!({"valid": true, "errors": [], "warnings": warnings}),
                     id.clone(),
-                )
+                ),
+                Err(errors) => {
+                    let err_strs: Vec<String> = errors.iter().map(std::string::ToString::to_string).collect();
+                    make_success(
+                        serde_json::json!({"valid": false, "errors": err_strs, "warnings": warnings}),
+                        id.clone(),
+                    )
+                }
             }
         },
         Err(e) => make_success(
@@ -169,13 +175,23 @@ async fn handle_describe_schema(id: &Value) -> Value {
                                     {
                                         "type": "object",
                                         "properties": {
+                                            "type": {"const": "llm_sdk"},
+                                            "model": {"type": "string"},
+                                            "api_key_env": {"type": "string"},
+                                            "system_prompt": {"type": "string"},
+                                            "prompt": {"type": "string"},
+                                            "routes": {"type": "array", "items": {"type": "string"}},
+                                            "max_tokens": {"type": "integer"}
+                                        },
+                                        "required": ["type", "model"]
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {
                                             "type": {"const": "llm"},
                                             "command": {"type": "string"},
                                             "prompt": {"type": "string"},
-                                            "routes": {
-                                                "type": "array",
-                                                "items": {"type": "string"}
-                                            },
+                                            "routes": {"type": "array", "items": {"type": "string"}},
                                             "max_tokens": {"type": "integer"}
                                         },
                                         "required": ["type", "command"]

@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use crate::db::Store;
 use crate::engine_bridge;
 use crate::models::RunRow;
+#[cfg(test)]
 use crate::ws::WsRoom;
 use nexus_engine::model::EngineConfig;
 
@@ -68,7 +69,7 @@ pub async fn trigger(
     let run_id_clone = run_id.clone();
     let wf_id_clone = wf_id.clone();
     match tokio::task::spawn_blocking(move || store_for_create.create_run(&run_id_clone, &wf_id_clone)).await {
-        Ok(Ok(_)) => {}
+        Ok(Ok(())) => {}
         Ok(Err(e)) => {
             tracing::error!("[Runs] trigger create_run failed: {e}");
             return (
@@ -94,12 +95,12 @@ pub async fn trigger(
     let room_clone = room.clone();
     let run_id_clone = run_id.clone();
     let max_concurrency = body
-        .and_then(|b| b.get("max_concurrency").and_then(|v| v.as_u64()))
+        .and_then(|b| b.get("max_concurrency").and_then(serde_json::Value::as_u64))
         .map(|n| n as usize);
     tokio::spawn(async move {
         let config = EngineConfig::new(max_concurrency, 3600, 3);
         match engine_bridge::run_workflow(&def, config, room_clone, &run_id_clone, Some(cancel_flag)).await {
-            Ok(_) => {
+            Ok(()) => {
                 if let Err(e) = store_clone.finish_run(&run_id_clone, "completed", None) {
                     tracing::error!("[Runs] finish_run failed: {e}");
                 }
@@ -135,7 +136,7 @@ pub async fn list_all(State(store): State<Store>) -> Json<Vec<RunRow>> {
     }
 }
 
-/// GET /api/runs/{run_id} — get run details.
+/// GET /`api/runs/{run_id`} — get run details.
 pub async fn get_by_id(
     State(store): State<Store>,
     Path(run_id): Path<String>,
@@ -161,7 +162,7 @@ pub async fn get_by_id(
     }
 }
 
-/// POST /api/runs/{run_id}/stop — stop a running workflow.
+/// POST /`api/runs/{run_id}/stop` — stop a running workflow.
 pub async fn stop(
     State(state): State<crate::state::AppState>,
     Path(run_id): Path<String>,
@@ -179,7 +180,7 @@ pub async fn stop(
     }
 }
 
-/// GET /api/runs/{run_id}/graph — live graph status for a run.
+/// GET /`api/runs/{run_id}/graph` — live graph status for a run.
 ///
 /// Not yet implemented — requires the engine to expose a run-id-keyed
 /// graph snapshot.  Returns 501 Not Implemented.

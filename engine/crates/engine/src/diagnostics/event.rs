@@ -222,7 +222,7 @@ pub fn emit_system(event: &SystemEvent) {
 mod tests {
     use super::*;
 
-    /// Verify that every NodeLifecycleEvent variant can be emitted without panic.
+    /// Verify that every `NodeLifecycleEvent` variant can be emitted without panic.
     #[test]
     fn test_emit_all_lifecycle_variants() {
         let variants: Vec<NodeLifecycleEvent> = vec![
@@ -237,20 +237,20 @@ mod tests {
         }
     }
 
-    /// Verify that every EngineLifecycleEvent variant can be emitted without panic.
+    /// Verify that every `EngineLifecycleEvent` variant can be emitted without panic.
     #[test]
     fn test_emit_all_engine_variants() {
         let variants: Vec<EngineLifecycleEvent> = vec![
             EngineLifecycleEvent::Started { node_count: 5, max_concurrency: 4, default_timeout_secs: 3600 },
             EngineLifecycleEvent::Converged { duration: Duration::from_secs(10) },
-            EngineLifecycleEvent::TimedOut { duration: Duration::from_secs(60) },
+            EngineLifecycleEvent::TimedOut { duration: Duration::from_mins(1) },
         ];
         for ev in &variants {
             emit_engine(ev);
         }
     }
 
-    /// Verify that every SystemEvent variant can be emitted without panic.
+    /// Verify that every `SystemEvent` variant can be emitted without panic.
     #[test]
     fn test_emit_all_system_variants() {
         let variants: Vec<SystemEvent> = vec![

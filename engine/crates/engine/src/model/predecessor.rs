@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Default threshold value (1 = trigger after first occurrence).
-pub fn default_threshold() -> u64 {
+#[must_use]
+pub const fn default_threshold() -> u64 {
     1
 }
 
@@ -31,7 +32,7 @@ pub enum EventType {
 }
 
 /// A scheduling edge in the workflow graph.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchedulingEdgeDef {
     /// Source node ID.
     pub from: String,
@@ -41,7 +42,7 @@ pub struct SchedulingEdgeDef {
     pub trigger: TriggerExpr,
     /// Which event type triggers this edge.
     pub event: EventType,
-    /// Optional exit_reason filter (string match).
+    /// Optional `exit_reason` filter (string match).
     #[serde(default)]
     pub exit_reason: Option<String>,
     /// Number of matching events required before triggering.
@@ -50,7 +51,7 @@ pub struct SchedulingEdgeDef {
 }
 
 /// A data flow edge connecting an output to an input.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataFlowDef {
     /// Source node ID providing the data.
     pub from: String,
