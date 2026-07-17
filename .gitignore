@@ -24,7 +24,7 @@ nexus-dist/
 docs/
 
 # Design & architecture docs (non-user-facing)
-doc/design/
+doc/
 
 # Review / backup artifacts
 bak/
