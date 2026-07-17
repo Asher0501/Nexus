@@ -10,19 +10,28 @@
 
 ## Nexus vs LangGraph
 
+The fundamental difference is **execution philosophy**:
+
+| | LangGraph (centralized) | Nexus (decentralized) |
+|---|------------------------|----------------------|
+| **Execution model** | Engine calls your functions in-process | Engine spawns independent processes, waits for results |
+| **Who owns execution** | The runtime — it runs your code | The nodes — the engine only schedules and routes |
+| **State** | Centralized State object, checkpointed externally | No shared state — each node gets only its declared upstream data |
+| **Node identity** | Python function, tightly coupled to runtime | Any process that speaks JSON on stdin/stdout — any language, any runtime |
+| **Failure isolation** | One node crashes → entire runtime dies | One node fails → engine routes to error handler, others unaffected |
+
+In practice:
+
 | | LangGraph | Nexus |
 |---|-----------|-------|
 | **Workflow definition** | Python code (StateGraph) | Pure JSON — no coding |
-| **Node implementation** | Python functions | Any process (any language, any runtime) |
-| **Node protocol** | Function calls (in-process) | stdin/stdout JSON (cross-process, cross-language) |
 | **Routing** | Conditional edges in code | `exit_reason` string matching in JSON |
 | **Data flow** | Shared state object | Independent `dataflows` graph — can route opposite to execution order |
-| **Cycle termination** | `interrupt()` + external resume | `route_policy` (N rounds or N seconds), stateless — no checkpoint |
-| **Human-in-the-loop** | Forced `interrupt()` at node | LLM autonomously calls `ask_human` tool when uncertain |
-| **Execution model** | In-process Python | Subprocess orchestration — heterogeneous nodes in one DAG |
+| **Cycle termination** | `interrupt()` + external resume + checkpoint | `route_policy` (N rounds / N seconds), stateless — no checkpoint needed |
+| **Human-in-the-loop** | Forced `interrupt()` at specific node | LLM autonomously calls `ask_human` tool when uncertain |
 | **Deployment** | Python runtime required | Single binary (~4MB), no runtime dependency |
 
-LangGraph is a **graph-as-code** library for Python agents. Nexus is a **graph-as-data** engine — define in JSON, execute anywhere, nodes can be anything.
+LangGraph is a **graph-as-code** library — the runtime owns everything. Nexus is a **graph-as-data** engine — the engine schedules, the nodes execute.
 
 ## When to Use
 
