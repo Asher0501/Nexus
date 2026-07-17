@@ -1,0 +1,40 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "providers": [{
+        "type": "subprocess",
+        "command": "python -c __import__('sys').stdout.write(bytes.fromhex('7b22726f757465223a226f6b222c22636f6e74656e74223a2263686f6f73652061726368697465637475726520666f72206e65772070726f6a656374227d').decode())"
+      }],
+      "process_timeout_secs": 5
+    },
+    {
+      "id": "decide",
+      "providers": [{
+        "type": "llm_sdk",
+        "model": "claude-sonnet-5-20251001",
+        "system_prompt": "You MUST use ask_human tool. Call it with the question provided. Do NOT answer directly.",
+        "prompt": "Call ask_human with: question='Pick architecture for new project?', options=['Monolith','Microservices','Hybrid']. Then output ONLY: {\"route\":\"ok\",\"content\":\"chosen: ANSWER\"}",
+        "routes": ["ok"],
+        "max_tokens": 512
+      }],
+      "process_timeout_secs": 300
+    },
+    {
+      "id": "done",
+      "providers": [{
+        "type": "subprocess",
+        "command": "python -c __import__('sys').stdout.write(bytes.fromhex('7b22726f757465223a226f6b222c22636f6e74656e74223a226869746c20636c69207465737420636f6d706c657465227d').decode())"
+      }],
+      "process_timeout_secs": 5
+    }
+  ],
+  "edges": [
+    {"from": "start", "to": "decide", "trigger": "any", "event": "complete"},
+    {"from": "decide", "to": "done", "trigger": "any", "event": "complete"}
+  ],
+  "dataflows": [
+    {"from": "start", "to": "decide"},
+    {"from": "decide", "to": "done"}
+  ]
+}

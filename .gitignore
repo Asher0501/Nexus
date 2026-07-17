@@ -23,9 +23,11 @@ nexus-dist/
 # Core documentation (confidential)
 docs/
 
+# Design & architecture docs (non-user-facing)
+doc/design/
+
 # Review / backup artifacts
 bak/
-design/
 tmp/
 nexus_evaluation_report.html
 

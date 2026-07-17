@@ -24,7 +24,7 @@ MCP config format (compatible with Claude Code's mcp.json):
 
 import json
 import os
-import shlex
+import uuid
 import subprocess
 import sys
 import time
@@ -69,9 +69,223 @@ BUILTIN_TOOLS = [
             "required": ["command"],
         },
     },
+    {
+        "name": "ask_human",
+        "description": "Ask a human for input when you are uncertain or need clarification. Use this for architectural decisions, trade-off calls, or when you need domain knowledge you lack. The human will see your question and options, then respond.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "The question to ask. Be specific."},
+                "context": {"type": "string", "description": "Brief context: why you need input."},
+                "options": {"type": "array", "items": {"type": "string"}, "description": "Suggested options for the human to choose from."},
+            },
+            "required": ["question"],
+        },
+    },
 ]
 
-# ── File I/O helpers (also used by built-in read_file / write_file tools) ──
+# ── Human-in-the-loop: HTTP memory pool ────────────────────
+
+POOL_PORT = int(os.environ.get("NEXUS_HUMAN_PORT", "19876"))
+POOL_URL = f"http://127.0.0.1:{POOL_PORT}"
+
+
+def _ensure_pool_server():
+    """Start the HTTP pool server if not already running.
+    Spawns humansrv.py as a subprocess to avoid import path issues."""
+    import urllib.request as _ur
+    try:
+        _ur.urlopen(f"{POOL_URL}/health", timeout=1)
+        return  # already running
+    except Exception:
+        pass
+
+    # Find humansrv.py — try locations relative to this script
+    script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
+    candidates = [
+        os.path.join(script_dir, "humansrv.py"),
+        os.path.join(os.getcwd(), "humansrv.py"),
+        os.path.join(os.getcwd(), "scripts", "humansrv.py"),
+    ]
+    server_script = None
+    for c in candidates:
+        if os.path.isfile(c):
+            server_script = c
+            break
+    if not server_script:
+        # Try import as last resort
+        try:
+            from humansrv import start_server as _start
+            _start(POOL_PORT)
+            for _ in range(20):
+                try:
+                    _ur.urlopen(f"{POOL_URL}/health", timeout=0.2)
+                    return
+                except Exception:
+                    time.sleep(0.1)
+        except ImportError:
+            pass
+        sys.stderr.write("[tool_bridge] humansrv.py not found\n")
+        return
+
+    # Spawn as subprocess (daemon, survives wrapper)
+    subprocess.Popen(
+        [sys.executable, server_script, str(POOL_PORT)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    for _ in range(20):
+        try:
+            _ur.urlopen(f"{POOL_URL}/health", timeout=0.2)
+            return
+        except Exception:
+            time.sleep(0.1)
+    sys.stderr.write("[tool_bridge] pool server failed to start\n")
+
+
+# ── Human-in-the-loop: file-based fallback ─────────────────
+
+HUMAN_POLL_INTERVAL = 0.2
+
+
+def _human_dir() -> str:
+    return os.environ.get("NEXUS_HUMAN_DIR", os.path.join(os.getcwd(), "tmp", "human_io"))
+
+
+def _run_ask_human(tool_input: dict) -> str:
+    """Ask a human via the in-memory HTTP pool. Blocks until answered."""
+    try:
+        import urllib.request as _ur
+        qid = str(uuid.uuid4())
+        question = tool_input.get("question", "")
+        options = tool_input.get("options", [])
+        context = tool_input.get("context", "")
+
+        # 1. Ensure pool server is running (first wrapper starts it)
+        _ensure_pool_server()
+
+        # 2. Post question to pool
+        body = json.dumps({"question": question, "options": options, "context": context}).encode()
+        req = _ur.Request(f"{POOL_URL}/q", data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        resp = _ur.urlopen(req)
+        data = json.loads(resp.read().decode())
+        qid = data["qid"]
+
+        # 3. Signal via stderr for Dashboard/CLI display
+        sys.stderr.write(f"[HUMAN_QUESTION]{json.dumps({'id': qid, 'question': question, 'options': options, 'context': context}, ensure_ascii=True)}\n")
+        sys.stderr.flush()
+
+        # 4. Block until answer (server-side threading.Event)
+        resp = _ur.urlopen(f"{POOL_URL}/a/{qid}")
+        data = json.loads(resp.read().decode())
+        answer = data.get("answer", "")
+
+        sys.stderr.write(f"[HUMAN_ANSWERED]{json.dumps({'id': qid})}\n")
+        sys.stderr.flush()
+        return answer
+
+    except Exception as e:
+        sys.stderr.write(f"[HUMAN_ERROR] {e}\n")
+        sys.stderr.flush()
+        # Fallback to file-based if pool fails
+        return _run_ask_human_file(tool_input)
+
+
+def _acquire_tty_lock(lock_path: Path) -> bool:
+    """Try to acquire the terminal lock. Returns True if acquired."""
+    try:
+        # Atomic: create only if doesn't exist (O_CREAT | O_EXCL)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except (OSError, FileExistsError):
+        return False
+
+
+def _try_terminal_input(question: str, options: list, context: str) -> str | None:
+    """Try to read answer directly from terminal (bypasses engine's stdin pipe).
+    Returns answer on success, None if terminal unavailable.
+    Claude Code style — engine closed the pipe, we can open the real terminal.
+    """
+    try:
+        tty = open("CONIN$" if sys.platform == "win32" else "/dev/tty",
+                    "r", encoding="utf-8", errors="replace")
+    except (OSError, IOError):
+        return None
+
+    try:
+        sys.stderr.write("\n" + "=" * 54 + "\n")
+        if context:
+            sys.stderr.write(f"Context: {context}\n")
+        sys.stderr.write(f"Question: {question}\n")
+        if options:
+            for i, o in enumerate(options):
+                sys.stderr.write(f"  [{i + 1}] {o}\n")
+            sys.stderr.write("Enter number or type answer: ")
+        else:
+            sys.stderr.write("Your answer: ")
+        sys.stderr.flush()
+
+        line = tty.readline()
+        if not line:
+            return None
+        answer = line.strip()
+        if answer.isdigit() and options:
+            idx = int(answer) - 1
+            if 0 <= idx < len(options):
+                answer = options[idx]
+        sys.stderr.write(f"Received: {answer}\n" + "=" * 54 + "\n")
+        sys.stderr.flush()
+        return answer
+    except Exception:
+        return None
+    finally:
+        try: tty.close()
+        except Exception: pass
+
+
+def _run_ask_human_file(tool_input: dict) -> str:
+    """File-based fallback when HTTP pool is unavailable."""
+    qid = str(uuid.uuid4())
+    question = tool_input.get("question", "")
+    options = tool_input.get("options", [])
+    context = tool_input.get("context", "")
+
+    q_dir = Path(_human_dir()) / qid
+    q_dir.mkdir(parents=True, exist_ok=True)
+    (q_dir / "question.json").write_text(json.dumps({
+        "id": qid, "question": question, "options": options,
+        "context": context, "status": "waiting", "ts": time.time(),
+    }), encoding="utf-8")
+
+    payload = json.dumps({"id": qid, "question": question,
+                          "options": options, "context": context}, ensure_ascii=True)
+    sys.stderr.write(f"[HUMAN_QUESTION]{payload}\n")
+    sys.stderr.flush()
+
+    answer_file = q_dir / "answer.json"
+    deadline = time.time() + 86400
+    while time.time() < deadline:
+        if answer_file.exists():
+            try:
+                ans = json.loads(answer_file.read_text(encoding="utf-8"))
+                answer = ans.get("answer", str(ans))
+                sys.stderr.write(f"[HUMAN_ANSWERED]{json.dumps({'id': qid})}\n")
+                sys.stderr.flush()
+                answer_file.unlink(missing_ok=True)
+                (q_dir / "question.json").unlink(missing_ok=True)
+                try: q_dir.rmdir()
+                except OSError: pass
+                return answer
+            except (json.JSONDecodeError, OSError):
+                pass
+        time.sleep(HUMAN_POLL_INTERVAL)
+
+    sys.stderr.write(f"[HUMAN_TIMEOUT]{json.dumps({'id': qid})}\n")
+    sys.stderr.flush()
+    (q_dir / "question.json").unlink(missing_ok=True)
+    return "ERROR: No human response received within time limit."
+
 
 def _read_file(path: str) -> str:
     """Read a file or list a directory.  Returns content string."""
@@ -390,6 +604,8 @@ class ToolBridge:
             return _run_write_file(tool_input)
         if tool_name == "execute_command":
             return _run_shell(tool_input)
+        if tool_name == "ask_human":
+            return _run_ask_human(tool_input)
 
         # MCP tool
         server_info = self._mcp_server_registry.get(tool_name)

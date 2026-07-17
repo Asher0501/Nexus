@@ -180,6 +180,54 @@ pub async fn stop(
     }
 }
 
+/// POST /api/runs/{run_id}/human_answer — answer a pending human question.
+pub async fn human_answer(
+    State(_state): State<crate::state::AppState>,
+    Path(_run_id): Path<String>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let qid = match body.get("question_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing question_id"}))),
+    };
+    let answer = body.get("answer").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // Forward to HTTP memory pool via raw TCP (same as CLI)
+    let result = tokio::task::spawn_blocking(move || {
+        let pool_port = std::env::var("NEXUS_HUMAN_PORT").unwrap_or_else(|_| "19876".into());
+        let body = serde_json::json!({"answer": answer, "answered_by": "dashboard"}).to_string();
+        let req = format!(
+            "POST /a/{qid} HTTP/1.1\r\nHost: 127.0.0.1:{pool_port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        match std::net::TcpStream::connect(format!("127.0.0.1:{pool_port}")) {
+            Ok(mut s) => {
+                use std::io::{Read, Write};
+                let _ = s.write_all(req.as_bytes());
+                let _ = s.shutdown(std::net::Shutdown::Write);
+                let mut resp = Vec::new();
+                let _ = s.read_to_end(&mut resp);
+                let resp_str = String::from_utf8_lossy(&resp);
+                if resp_str.contains("200 OK") || resp_str.contains("accepted") {
+                    Ok(())
+                } else if resp_str.contains("404") {
+                    Err("not_found")
+                } else {
+                    Err("error")
+                }
+            }
+            Err(_) => Err("connection_failed"),
+        }
+    }).await;
+
+    match result {
+        Ok(Ok(())) => (StatusCode::OK, Json(json!({"status": "accepted"}))),
+        Ok(Err(e)) if e == "not_found" =>
+            (StatusCode::NOT_FOUND, Json(json!({"error": "question not found or already answered"}))),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "pool unreachable"}))),
+    }
+}
+
 /// GET /`api/runs/{run_id}/graph` — live graph status for a run.
 ///
 /// Not yet implemented — requires the engine to expose a run-id-keyed
@@ -222,6 +270,7 @@ mod tests {
             .route("/runs", axum::routing::get(super::list_all))
             .route("/runs/{run_id}", axum::routing::get(super::get_by_id))
             .route("/runs/{run_id}/stop", axum::routing::post(super::stop))
+            .route("/runs/{run_id}/human_answer", axum::routing::post(super::human_answer))
             .route("/runs/{run_id}/graph", axum::routing::get(super::graph_status))
             .with_state(state)
     }

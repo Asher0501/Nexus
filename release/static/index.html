@@ -97,6 +97,10 @@ textarea { font-family: 'Cascadia Code','Fira Code',monospace; min-height: 200px
 #overlay{position:fixed;top:0;left:0;width:100vw;height:100vh;
   background:rgba(0,0,0,.35);z-index:199;display:none}
 #overlay.show{display:block}
+.human-card { position:fixed;bottom:16px;right:16px;width:380px;max-width:95vw;background:var(--card-bg);border:1px solid var(--accent);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.24);z-index:999;display:none;overflow:hidden; }
+.human-card-header { padding:10px 14px;background:var(--accent);color:#fff;font-weight:700;font-size:14px; }
+.human-card-body { padding:10px 14px;max-height:200px;overflow-y:auto; }
+.human-card-footer { padding:8px 14px;display:flex;border-top:1px solid var(--border);background:var(--bg); }
 </style>
 </head>
 <body>
@@ -128,6 +132,7 @@ const STATUS_COLORS = {
 let dagNetwork = null, dagNodes = null, dagEdges = null;
 let dagReady = false, pendingStatuses = [];
 let logs = [], wsConnection = null;
+let pendingHitl = {}; // qid → {node_id, question, options, context}
 let nodeStates = {};
 let activeRunId = null;
 let currentGraph = null; // {nodes:[],edges:[],dataflows:[]} for the active view
@@ -614,6 +619,21 @@ function connectWS(runId) {
           break;
         case 'node_chunk':
           appendLog(msg.data.node_id, msg.data.text, msg.data.ts);
+          // HITL detection
+          if (msg.data.text.startsWith('[HUMAN_QUESTION]')) {
+            try {
+              var q = JSON.parse(msg.data.text.slice(16));
+              pendingHitl[q.id] = {node_id: msg.data.node_id, question: q.question, options: q.options, context: q.context};
+              markHitlNode(msg.data.node_id, true);
+              refreshNodePanelIfOpen(msg.data.node_id);
+            } catch(_) {}
+          } else if (msg.data.text.startsWith('[HUMAN_ANSWERED]')) {
+            try { var a = JSON.parse(msg.data.text.slice(17)); var info = pendingHitl[a.id]; if (info) markHitlNode(info.node_id, false); delete pendingHitl[a.id]; } catch(_) {}
+            refreshNodePanelIfOpen(null);
+          } else if (msg.data.text.startsWith('[HUMAN_TIMEOUT]')) {
+            try { var t = JSON.parse(msg.data.text.slice(16)); var ti = pendingHitl[t.id]; if (ti) markHitlNode(ti.node_id, false); delete pendingHitl[t.id]; } catch(_) {}
+            refreshNodePanelIfOpen(null);
+          }
           break;
         case 'snapshot':
           if (msg.data.nodes) Object.entries(msg.data.nodes).forEach(([id, s]) => updateNodeStatus(id, s));
@@ -700,6 +720,25 @@ function showNodeDetail(nodeId) {
     var ptype = provider.type || '?';
 
     var html = '<h3>' + esc(nodeId) + '</h3>';
+
+    // HITL: show pending question
+    var hitlEntry = Object.values(pendingHitl).find(function(h) { return h.node_id === nodeId; });
+    if (hitlEntry) {
+      html += '<div style="background:#1e3a5f;border:1px solid var(--accent);border-radius:6px;padding:10px 12px;margin-top:8px">';
+      html += '<div style="font-weight:700;color:var(--accent);margin-bottom:4px">Needs your input</div>';
+      if (hitlEntry.context) html += '<div style="color:var(--muted);font-size:12px;margin-bottom:4px">' + esc(hitlEntry.context) + '</div>';
+      html += '<div style="margin-bottom:6px"><strong>Q:</strong> ' + esc(hitlEntry.question) + '</div>';
+      if (hitlEntry.options && hitlEntry.options.length) {
+        html += '<div style="margin-bottom:6px">';
+        hitlEntry.options.forEach(function(o) {
+          html += '<button class="btn" style="margin:2px 4px 2px 0;font-size:12px" onclick="submitHitlAnswer(\'' + esc(nodeId) + '\',\'' + esc(o) + '\')">' + esc(o) + '</button>';
+        });
+        html += '</div>';
+      }
+      html += '<div style="display:flex"><input id="hitl-input-' + esc(nodeId) + '" type="text" placeholder="Or type answer..." style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px">';
+      html += '<button class="btn btn-primary" style="margin-left:6px;font-size:12px" onclick="var v=document.getElementById(\'hitl-input-' + esc(nodeId) + '\').value; if(v) submitHitlAnswer(\'' + esc(nodeId) + '\',v)">Send</button></div>';
+      html += '</div>';
+    }
 
     // Basic info
     html += '<h4>Basic</h4>';
@@ -806,6 +845,122 @@ function closeNodePanel() {
   if (overlay) overlay.classList.remove('show');
 }
 document.getElementById('overlay').addEventListener('click', closeNodePanel);
+
+// ── HITL node panel integration ──────────────────────────────
+
+function refreshNodePanelIfOpen(nodeId) {
+  var panel = document.getElementById('node-panel');
+  if (!panel || !panel.classList.contains('open')) return;
+  // Re-render — find current open node
+  var title = panel.querySelector('h3');
+  if (title) showNodeDetail(title.textContent);
+}
+
+function submitHitlAnswer(nodeId, answer) {
+  var entry = Object.values(pendingHitl).find(function(h) { return h.node_id === nodeId; });
+  if (!entry) return;
+  var qid = Object.keys(pendingHitl).find(function(k) { return pendingHitl[k].node_id === nodeId; });
+  if (!qid) return;
+  var rid = activeRunId || (location.hash.split('/').pop() || '');
+  fetch('/api/runs/' + rid + '/human_answer', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({question_id: qid, answer: answer})
+  }).then(function(r) {
+    if (r.ok) {
+      markHitlNode(nodeId, false);
+      delete pendingHitl[qid];
+      showNodeDetail(nodeId);
+    } else r.json().then(function(e) { alert(e.error || 'Failed'); });
+  });
+}
+
+// Remove floating human-card (now in node panel)
+function showHumanQuestion() {} // no-op
+function dismissHumanQuestion() {} // no-op
+
+function markHitlNode(nodeId, waiting) {
+  if (!dagNetwork || !dagNodes) return;
+  try {
+    var nodes = dagNodes.get();
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].id === nodeId) {
+        var update = waiting
+          ? {id: nodeId, label: '⏳ ' + nodeId, color: {border: '#f59e0b', background: '#3a2a1a'}, font: {color: '#f59e0b'}}
+          : {id: nodeId, label: nodeId, color: {border: '#3b82f6', background: '#1e293b'}, font: {color: '#e2e8f0'}};
+        dagNodes.update(update);
+        break;
+      }
+    }
+  } catch(_) {}
+}
+
+// ── Human-in-the-Loop ──────────────────────────────────────────
+
+function showHumanQuestion(nodeId, question, runId) {
+  var card = document.getElementById('human-question-card');
+  if (!card) {
+    card = document.createElement('div');
+    card.id = 'human-question-card';
+    card.className = 'human-card';
+    card.innerHTML = '<div class="human-card-header">LLM needs your input <span style="color:var(--muted);font-size:12px">on ' + esc(nodeId) + '</span></div>'
+      + '<div class="human-card-body"><div id="human-q-text"></div><div id="human-q-ctx" style="color:var(--muted);margin-bottom:8px;font-size:13px"></div><div id="human-q-options"></div></div>'
+      + '<div class="human-card-footer"><input id="human-answer-input" type="text" placeholder="Type answer or click option..." style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)">'
+      + '<button id="human-submit-btn" class="btn btn-primary" style="margin-left:8px">Send</button></div>';
+    document.body.appendChild(card);
+  }
+  card.style.display = 'block';
+  document.getElementById('human-q-text').innerHTML = '<strong>Q:</strong> ' + esc(question.question);
+  if (question.context) document.getElementById('human-q-ctx').textContent = 'Context: ' + question.context;
+  else document.getElementById('human-q-ctx').textContent = '';
+  var optDiv = document.getElementById('human-q-options');
+  optDiv.innerHTML = '';
+  if (question.options && question.options.length) {
+    question.options.forEach(function(o) {
+      var btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.style.cssText = 'margin:2px 4px 2px 0;font-size:13px';
+      btn.textContent = o;
+      btn.onclick = function() {
+        document.getElementById('human-answer-input').value = o;
+        submitHumanAnswer(runId, question.id, o);
+      };
+      optDiv.appendChild(btn);
+    });
+  }
+  document.getElementById('human-submit-btn').onclick = function() {
+    var ans = document.getElementById('human-answer-input').value.trim();
+    if (ans) submitHumanAnswer(runId, question.id, ans);
+  };
+  document.getElementById('human-answer-input').onkeydown = function(e) {
+    if (e.key === 'Enter') {
+      var ans = document.getElementById('human-answer-input').value.trim();
+      if (ans) submitHumanAnswer(runId, question.id, ans);
+    }
+  };
+  document.getElementById('human-answer-input').value = '';
+}
+
+function submitHumanAnswer(runId, questionId, answer) {
+  var btn = document.getElementById('human-submit-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+  fetch('/api/runs/' + runId + '/human_answer', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({question_id: questionId, answer: answer})
+  }).then(function(r) {
+    if (!r.ok) return r.json().then(function(e) { alert(e.error || 'Failed'); });
+    document.getElementById('human-submit-btn').textContent = 'Sent!';
+    setTimeout(dismissHumanQuestion, 500);
+  }).catch(function() {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
+  });
+}
+
+function dismissHumanQuestion() {
+  var card = document.getElementById('human-question-card');
+  if (card) card.style.display = 'none';
+}
 </script>
 </body>
 </html>

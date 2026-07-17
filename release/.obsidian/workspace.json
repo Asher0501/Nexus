@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "NEXUS_WORKFLOW_SKILL.md",
+                "file": "tmp/code_review_task.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "NEXUS_WORKFLOW_SKILL"
+              "title": "code_review_task"
             }
           }
         ]
@@ -185,24 +185,23 @@
   },
   "active": "836cd995d3f42f77",
   "lastOpenFiles": [
-    "log/run-6a9250b7-7e0b-4198-8882-b63900505c11.log",
-    "log/run-e972382f-5e59-41d8-acb7-c4fa9a577d4d.log",
-    "CODE_REVIEW_REPORT.md",
-    "WORKFLOW_REFERENCE.md.tmp.21708.fdff0aecef30",
-    "DESIGN_PRINCIPLES.md",
-    "DESIGN_PRINCIPLES.md.tmp.21708.b5bc1de78175",
-    "NEXUS_WORKFLOW_SKILL.md.tmp.21708.9b9c4ba3e4c5",
     "tmp/code_fix_task.md",
+    "NEXUS_WORKFLOW_SKILL.md",
+    "log/run-bc5a5729-ccd8-45f9-a73f-dd03b15567da.log",
+    "log/run-d2e80666-3e30-4c99-b658-f633554dd8a5.log",
+    "static/index.html.tmp.3376.13125ef9a0d6",
+    "static/index.html.tmp.3376.a0894cac9cfc",
+    "static/index.html.tmp.3376.293ff88ece96",
+    "log/run-17bf568b-0568-4390-9625-d67f5888d3fa.log",
+    "log/run-078441cc-0b0f-4b49-acac-6bd6880c6bbc.log",
+    "static/index.html.tmp.3376.6597742f63ce",
+    "static/index.html.tmp.3376.10f8338f84be",
+    "log/run-27e08b10-cdef-4782-8bc7-9999fde40559.log",
+    "CODE_REVIEW_REPORT.md",
+    "DESIGN_PRINCIPLES.md",
     "tmp/code_review_task.md",
     "review_doc.md",
-    "log/run-32395b77-70d9-47d6-8be0-e52aea859cff.log",
-    "tmp/code_fix_task.md.tmp.21708.8c82e089aea8",
-    "tmp/code_review_task.md.tmp.21708.3b164a116c60",
-    "tmp/code-review.json.tmp.21708.6c44590f7ab0",
-    "tmp/code-review.json.tmp.21708.ce1678e177ad",
-    "review_doc.md.tmp.20516.686f2d6726e2",
     "scripts/review_doc.md",
-    "NEXUS_WORKFLOW_SKILL.md",
     "SELF_SUPERVISED_FIX_REPORT.md",
     "WORKFLOW_REFERENCE.md",
     "tmp/review_task.md",

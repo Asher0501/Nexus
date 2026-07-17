@@ -11,8 +11,9 @@
 pub use tempfile as _tempfile_anchor; // tempfile used in tests
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use nexus_engine::diagnostics::event::NodeLifecycleEvent;
@@ -164,44 +165,124 @@ async fn main() {
                 max_timeout_retries,
             );
 
-            // Create the event callback that logs events to stderr in real time.
+            // ── HITL setup ──
+            let hitl_pending: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+            // Print header
+            let _ = writeln!(std::io::stderr());
+            for id in def.nodes.iter().map(|n| &n.id) {
+                let _ = writeln!(std::io::stderr(), "[.] {id}: Pending");
+            }
+            let _ = writeln!(std::io::stderr(), "{}", "─".repeat(54));
+
+            // Create event callback: lifecycle events only, chunks suppressed except HITL
+            let hq2 = hitl_pending.clone();
             let event_cb: nexus_engine::runtime::NodeEventCb = Arc::new(move |event| {
-                use std::io::Write;
                 match event {
-                    NodeEvent::Lifecycle(lifecycle) => match lifecycle {
-                        NodeLifecycleEvent::Running { node_id, .. } => {
-                            let _ = writeln!(std::io::stderr(), "[>] {node_id}: running...").ok();
-                        }
-                        NodeLifecycleEvent::Completed { node_id, output_size } => {
-                            let _ = writeln!(std::io::stderr(), "[v] {node_id}: completed ({output_size} bytes)").ok();
-                        }
-                        NodeLifecycleEvent::Failed { node_id, exit_reason, .. } => {
-                            let _ = writeln!(std::io::stderr(), "[x] {node_id}: failed ({exit_reason})").ok();
-                        }
-                        NodeLifecycleEvent::TimedOut { node_id, timeout_secs } => {
-                            let _ = writeln!(std::io::stderr(), "[x] {node_id}: timed out ({timeout_secs}s)").ok();
-                        }
-                        NodeLifecycleEvent::Pending { .. } => {} // not displayed
+                    NodeEvent::Lifecycle(lifecycle) => {
+                        let (symbol, nid, msg) = match &lifecycle {
+                            NodeLifecycleEvent::Running { node_id, .. } => (">", node_id.clone(), "Running".to_string()),
+                            NodeLifecycleEvent::Completed { node_id, output_size } => ("v", node_id.clone(), format!("Completed ({output_size} bytes)")),
+                            NodeLifecycleEvent::Failed { node_id, exit_reason, .. } => ("x", node_id.clone(), format!("Failed ({exit_reason})")),
+                            NodeLifecycleEvent::TimedOut { node_id, timeout_secs } => ("x", node_id.clone(), format!("TimedOut ({timeout_secs}s)")),
+                            _ => return,
+                        };
+                        let _ = writeln!(std::io::stderr(), "[{symbol}] {nid}: {msg}");
                     },
-                    NodeEvent::NodeChunk { node_id, text } => {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() && trimmed.len() < 120 {
-                            let _ = writeln!(std::io::stderr(), "[ ] {node_id}: {trimmed}").ok();
+                    NodeEvent::NodeChunk { ref node_id, ref text } => {
+                        let t = text.trim();
+                        if t.starts_with("[HUMAN_QUESTION]") {
+                            if let Ok(p) = serde_json::from_str::<serde_json::Value>(&text[16..]) {
+                                let qid = p["id"].as_str().unwrap_or("").to_string();
+                                if let Ok(mut g) = hq2.lock() { g.push((qid, node_id.clone())); }
+                            }
+                        } else if t.starts_with("[HUMAN_ANSWERED]") || t.starts_with("[HUMAN_TIMEOUT]") {
+                            // queue handled by stdin thread
+                        }
+                        // Non-HITL chunks: suppressed from terminal (go to log file)
+                    }
+                    // Legacy flat variants — some code paths emit these
+                    NodeEvent::NodeRunning { ref node_id, .. } => {
+                        let _ = writeln!(std::io::stderr(), "[>] {node_id}: Running");
+                    }
+                    NodeEvent::NodeCompleted { ref node_id } => {
+                        let _ = writeln!(std::io::stderr(), "[v] {node_id}: Completed");
+                    }
+                    NodeEvent::NodeFailed { ref node_id } => {
+                        let _ = writeln!(std::io::stderr(), "[x] {node_id}: Failed");
+                    }
+                    NodeEvent::NodeTimedOut { ref node_id } => {
+                        let _ = writeln!(std::io::stderr(), "[x] {node_id}: TimedOut");
+                    }
+                    _ => {}
+                }
+            });
+
+            // ── HITL: stdin reader thread → HTTP pool ──
+            let hq = hitl_pending.clone();
+            let pp = std::env::var("NEXUS_HUMAN_PORT").unwrap_or_else(|_| "19876".into()).parse::<u16>().unwrap_or(19876);
+            std::thread::spawn(move || loop {
+                // Wait for questions, then display them one at a time
+                let qid = loop {
+                    if let Ok(mut g) = hq.lock() {
+                        if !g.is_empty() {
+                            break Some(g.remove(0));
                         }
                     }
-                    // Legacy flat variants — kept for backward compat; Lifecycle supersedes these.
-                    NodeEvent::NodeRunning { node_id, .. } => {
-                        let _ = writeln!(std::io::stderr(), "[>] {node_id}: running...").ok();
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                };
+                let Some((qid, node_id)) = qid else { continue };
+
+                // Fetch question details from pool and display
+                if let Ok(mut s) = std::net::TcpStream::connect(format!("127.0.0.1:{pp}")) {
+                    use std::io::{Read, Write as _};
+                    let req = format!("GET /pending HTTP/1.1\r\nHost: 127.0.0.1:{pp}\r\nConnection: close\r\n\r\n");
+                    let _ = s.write_all(req.as_bytes());
+                    let _ = s.shutdown(std::net::Shutdown::Write);
+                    let mut resp = Vec::new();
+                    let _ = s.read_to_end(&mut resp);
+                    let body = String::from_utf8_lossy(&resp);
+                    if let Some(js) = body.find("\r\n\r\n") {
+                        if let Ok(pending) = serde_json::from_str::<serde_json::Value>(&body[js+4..]) {
+                            if let Some(qs) = pending["questions"].as_array() {
+                                for q in qs {
+                                    if q["qid"].as_str() == Some(&qid) {
+                                        let _ = writeln!(std::io::stderr());
+                                        let _ = writeln!(std::io::stderr(), "╔══════════════════════════════════════════════╗");
+                                        let _ = writeln!(std::io::stderr(), "║  {node_id} needs your input");
+                                        if let Some(c) = q["context"].as_str() { if !c.is_empty() { let _ = writeln!(std::io::stderr(), "║  Context: {c}"); } }
+                                        let _ = writeln!(std::io::stderr(), "║  Q: {}", q["question"].as_str().unwrap_or(""));
+                                        if let Some(opts) = q["options"].as_array() {
+                                            for (i, o) in opts.iter().enumerate() {
+                                                let _ = writeln!(std::io::stderr(), "║    [{i}] {o}", i=i, o=o.as_str().unwrap_or(""));
+                                            }
+                                        }
+                                        let _ = writeln!(std::io::stderr(), "╚══════════════════════════════════════════════╝");
+                                        let _ = writeln!(std::io::stderr(), "→ Type answer and press Enter: ");
+                                        let _ = std::io::stderr().flush();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
-                    NodeEvent::NodeCompleted { node_id } => {
-                        let _ = writeln!(std::io::stderr(), "[v] {node_id}: completed").ok();
-                    }
-                    NodeEvent::NodeFailed { node_id } => {
-                        let _ = writeln!(std::io::stderr(), "[x] {node_id}: failed").ok();
-                    }
-                    NodeEvent::NodeTimedOut { node_id } => {
-                        let _ = writeln!(std::io::stderr(), "[x] {node_id}: timed out").ok();
-                    }
+                }
+
+                // Read answer from stdin
+                let mut buf = String::new();
+                if std::io::stdin().read_line(&mut buf).is_err() { break; }
+                let ans = buf.trim().to_string();
+                if ans.is_empty() { continue; }
+
+                // Post answer to pool
+                let body = format!("{{\"answer\":\"{}\"}}", ans.replace('"', "\\\""));
+                let req = format!("POST /a/{qid} HTTP/1.1\r\nHost: 127.0.0.1:{pp}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                if let Ok(mut s) = std::net::TcpStream::connect(format!("127.0.0.1:{pp}")) {
+                    use std::io::{Read, Write as _};
+                    let _ = s.write_all(req.as_bytes());
+                    let _ = s.shutdown(std::net::Shutdown::Write);
+                    let _ = writeln!(std::io::stderr(), "  Answer sent!");
+                    let mut r = Vec::new();
+                    let _ = s.read_to_end(&mut r);
                 }
             });
 

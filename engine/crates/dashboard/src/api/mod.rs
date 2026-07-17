@@ -20,5 +20,6 @@ pub fn routes() -> Router<AppState> {
         .route("/runs", axum::routing::get(runs::list_all))
         .route("/runs/{run_id}", axum::routing::get(runs::get_by_id))
         .route("/runs/{run_id}/stop", axum::routing::post(runs::stop))
+        .route("/runs/{run_id}/human_answer", axum::routing::post(runs::human_answer))
         .route("/runs/{run_id}/graph", axum::routing::get(runs::graph_status))
 }

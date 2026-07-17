@@ -1,0 +1,54 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "providers": [{
+        "type": "subprocess",
+        "command": "python -c __import__('sys').stdout.write(bytes.fromhex('7b22726f757465223a226f6b222c22636f6e74656e74223a22676f227d').decode())"
+      }],
+      "process_timeout_secs": 5
+    },
+    {
+      "id": "pick_arch",
+      "providers": [{
+        "type": "llm_sdk",
+        "model": "claude-sonnet-5-20251001",
+        "system_prompt": "Call ask_human with: question='Pick architecture?', options=['Monolith','Microservices','Hybrid']. Output ONLY: {\"route\":\"ok\",\"content\":\"arch=ANSWER\"}",
+        "prompt": "Ask the human which architecture to pick, then output the result.",
+        "routes": ["ok"],
+        "max_tokens": 256
+      }],
+      "process_timeout_secs": 300
+    },
+    {
+      "id": "pick_db",
+      "providers": [{
+        "type": "llm_sdk",
+        "model": "claude-sonnet-5-20251001",
+        "system_prompt": "Call ask_human with: question='Pick database?', options=['Postgres','MySQL','MongoDB']. Output ONLY: {\"route\":\"ok\",\"content\":\"db=ANSWER\"}",
+        "prompt": "Ask the human which database to pick, then output the result.",
+        "routes": ["ok"],
+        "max_tokens": 256
+      }],
+      "process_timeout_secs": 300
+    },
+    {
+      "id": "merge",
+      "providers": [{
+        "type": "subprocess",
+        "command": "python -c __import__('sys').stdout.write(bytes.fromhex('7b22726f757465223a226f6b222c22636f6e74656e74223a22616c6c20616e737765726564227d').decode())"
+      }],
+      "process_timeout_secs": 5
+    }
+  ],
+  "edges": [
+    {"from": "start",     "to": "pick_arch", "trigger": "any", "event": "complete"},
+    {"from": "start",     "to": "pick_db",   "trigger": "any", "event": "complete"},
+    {"from": "pick_arch", "to": "merge",     "trigger": "all", "event": "complete"},
+    {"from": "pick_db",   "to": "merge",     "trigger": "all", "event": "complete"}
+  ],
+  "dataflows": [
+    {"from": "pick_arch", "to": "merge"},
+    {"from": "pick_db",   "to": "merge"}
+  ]
+}
