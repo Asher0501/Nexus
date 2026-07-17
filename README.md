@@ -74,26 +74,26 @@ cd Nexus/engine && cargo build --release
 
 Review→fix→review loop. `route_policy.max_runs=3` guarantees it stops.
 
-## Core Design
+## Design
 
-### h_e + g_e — Stateless Edge Decomposition
+Nexus is built in three layers: a **theory** (how the scheduler reasons about edges), an **architecture** (how the pieces fit together), and a set of **capabilities** (what the user can do).
 
-Every edge is two orthogonal **pure functions** — no `triggered` flags, no state machines:
+### Theory: h_e + g_e — Stateless Edges
 
-- **h_e**: event type match + exit_reason filter + threshold counter (stateless, re-evaluated each event)
-- **g_e**: strategy aggregation — `any` (fire immediately) or `all` (wait for all upstreams)
+Every edge is decomposed into two orthogonal **pure functions**:
 
-**Value**: cycles are naturally supported without special handling. A node can re-enter itself through a cycle and h_e re-evaluates independently each time. Shorter, simpler scheduler code. Easier to reason about.
+| Function | Role | Behavior |
+|----------|------|----------|
+| **h_e** | Branch matching | Checks event type, exit_reason filter, threshold counter. Stateless — re-evaluated independently for every event. |
+| **g_e** | Strategy aggregation | `any` → fire immediately. `all` → wait for every upstream with `trigger:"all"` to fire, then reset. |
 
-### Scheduling / Dataflow Separation
+No `triggered` flags. No state machines. **Value**: cycles require zero special handling — a node re-entering through a cycle triggers h_e independently each time. The scheduler is shorter, simpler, and easier to reason about.
 
-`edges` control execution order. `dataflows` control data routing. **They are independent graphs.** You can route data opposite to execution direction, skip levels, or use aliases.
+### Architecture: Three Layers
 
-**Value**: Maximum routing flexibility. A downstream node can consume data from any upstream node regardless of the execution topology.
+**Scheduling / dataflow separation.** `edges` control execution order; `dataflows` control data routing. They are independent graphs — data can flow opposite to execution, skip levels, or use aliases. Maximum routing flexibility without coupling to the execution topology.
 
-### Provider Abstraction
-
-5 provider types under a single JSON protocol — stdin context in, stdout `{route, content}` out:
+**Provider abstraction.** Every node, regardless of type, follows the same protocol: stdin receives context JSON, stdout outputs `{route, content}`. Five provider types under this single contract:
 
 | Provider | Example |
 |----------|---------|
@@ -103,25 +103,19 @@ Every edge is two orthogonal **pure functions** — no `triggered` flags, no sta
 | `llm` | `"command": "claude -p \"{{prompt}}\""` |
 | `llm_sdk` | `"model": "claude-sonnet-5-20251001"` |
 
-**Value**: Heterogeneous nodes in one DAG. An HTTP health check can trigger an LLM analysis, whose output a shell script processes. No glue code.
+**Value**: heterogeneous nodes in one DAG. An HTTP health check triggers an LLM analysis, whose output a shell script processes. No glue code. Any language, any runtime.
 
-### LLM-Native Tool Architecture
+**Route policies.** Guaranteed loop termination without checkpoints. `max_runs` exits after N rounds; `max_duration` exits after N cumulative seconds. The engine overrides the node's route — the node doesn't even need to know it's in a loop.
 
-`llm_sdk` nodes have access to `read_file`, `write_file`, `execute_command`, and `ask_human`. LLM autonomously decides which tool to use and when.
+### Capabilities
 
-**Value**: The LLM drives the workflow, not the other way around. It decides it needs clarification → calls `ask_human`. It decides it needs to read a file → calls `read_file`. No preset interaction points.
+Built on the theory and architecture above:
 
-### Human-in-the-Loop as a Tool
-
-`ask_human` is a tool the LLM calls, not a forced checkpoint. When uncertain, the LLM asks. Dashboard shows the question in the node panel. CLI reads from terminal. In-memory HTTP pool — zero polling, zero files.
-
-**Value**: Human judgment enters at the LLM's discretion, not at pre-coded checkpoints. Works with fan-out — multiple LLMs ask simultaneously, questions queue up, answered one at a time.
-
-### Route Policies for Loop Termination
-
-`route_policy.max_runs` (N rounds) or `route_policy.max_duration` (N seconds) forces the engine to override the node's route, exiting the loop.
-
-**Value**: Loops are safe by construction. No infinite execution. No manual checkpoint/restore.
+- **LLM-native tools**: `read_file`, `write_file`, `execute_command`. LLM decides what to use and when.
+- **Human-in-the-loop**: `ask_human` is a tool the LLM calls when uncertain. In-memory HTTP pool — zero polling, zero files. Fan-out works: multiple LLMs ask simultaneously, questions queue up.
+- **Branch routing**: `{"route":"approved"}` → edges with `exit_reason:"approved"` fire.
+- **Fan-out / fan-in**: parallel nodes with `trigger:"all"` aggregation.
+- **10-point static validation**: deadlocks, unreachable nodes, missing dataflows caught before execution.
 
 ## Key Features
 
